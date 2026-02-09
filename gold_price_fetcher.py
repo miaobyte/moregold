@@ -6,13 +6,13 @@
 """
 import subprocess
 import json
-import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 _RATE_CACHE = {"value": None, "ts": 0}
 _RATE_TTL = 30 * 60
+_LEAD_SECONDS = 2
 
 def get_usd_to_cny_rate():
     """
@@ -175,10 +175,19 @@ def record_gold_price(price_info):
         return False
 
 def main():
-    """主函数"""
-    print("⏰ 开始查询金价...")
-    price_info = get_gold_price()
-    record_gold_price(price_info)
+    """主函数""" 
+    while True:
+        now = datetime.now()
+        next_run = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
+        if now >= next_run:
+            next_run += timedelta(minutes=5)
+        sleep_sec = (next_run - now).total_seconds() - _LEAD_SECONDS
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
+        while datetime.now() < next_run:
+            time.sleep(0.05)
+        print("⏰ 开始查询金价...")
+        record_gold_price(get_gold_price())
 
 if __name__ == "__main__":
     main()
