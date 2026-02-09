@@ -146,8 +146,8 @@ def record_gold_price(price_info):
     # 准备CSV记录内容 - 逗号分隔
     csv_line = f"{time_str},{price_usd} USD/oz,{price_cny} CNY/克"
     
-    # CSV文件路径
-    file_path = Path(f"/Users/peng.li24/minimax/gold/gold_{date_str}.csv")
+    # CSV文件路径（与脚本同目录）
+    file_path = Path(__file__).resolve().parent / f"gold_{date_str}.csv"
     
     try:
         # 检查文件是否存在，如果不存在则写入表头
