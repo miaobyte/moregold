@@ -7,14 +7,21 @@
 import subprocess
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
+
+_RATE_CACHE = {"value": None, "ts": 0}
+_RATE_TTL = 30 * 60
 
 def get_usd_to_cny_rate():
     """
     获取美元对人民币汇率
     使用免费的汇率API
     """
+    now = time.time()
+    if _RATE_CACHE["value"] and now - _RATE_CACHE["ts"] < _RATE_TTL:
+        return _RATE_CACHE["value"]
     try:
         # 使用 exchangerate-api 免费端点
         result = subprocess.run(
@@ -29,6 +36,8 @@ def get_usd_to_cny_rate():
             data = json.loads(result.stdout)
             rates = data.get('rates', {})
             if 'CNY' in rates:
+                _RATE_CACHE["value"] = rates['CNY']
+                _RATE_CACHE["ts"] = now
                 return rates['CNY']
     except Exception as e:
         print(f"⚠️ 获取汇率失败: {e}")

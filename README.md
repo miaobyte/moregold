@@ -15,20 +15,13 @@
 
 python3 gold_price_fetcher.py
 
+输出文件：脚本同目录下 gold_YYYY-MM-DD.csv
+
 ## 数据格式
 
-CSV 列：时间,金价(USD/盎司),金价(CNY/克),来源
+CSV 列：时间,金价(USD/盎司),金价(CNY/克)
 
 换算：$CNY/克=(USD/盎司 ÷ 31.1035) × 汇率$
-
-## 配置
-
-可在代码中调整：
-
-- FETCH_INTERVAL
-- VOLATILITY_THRESHOLD
-- MA_PERIOD
-- DEFAULT_USD_TO_CNY
 
 ## 风险提示
 
