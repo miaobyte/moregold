@@ -31,9 +31,9 @@ def get_usd_to_cny_rate():
             if 'CNY' in rates:
                 return rates['CNY']
     except Exception as e:
-        pass
+        print(f"⚠️ 获取汇率失败: {e}")
     
-    # 备用：使用固定汇率（约7.2）
+    print("⚠️ 使用备用汇率: 7.2")
     return 7.2
 
 def get_gold_price():
@@ -121,7 +121,7 @@ def record_gold_price(price_info):
     """
     记录金价到CSV文件
     文件名格式: gold_YYYY-MM-DD.csv
-    CSV格式: 时间,金价(USD/盎司),金价(CNY/克),来源
+    CSV格式: 时间,金价(USD/盎司),金价(CNY/克)
     """
     if not price_info.get('success'):
         return False
@@ -143,10 +143,8 @@ def record_gold_price(price_info):
     else:
         price_cny = 'N/A'
     
-    source = price_info.get('source', 'Unknown')
-    
     # 准备CSV记录内容 - 逗号分隔
-    csv_line = f"{time_str},{price_usd} USD/oz,{price_cny} CNY/克,{source}"
+    csv_line = f"{time_str},{price_usd} USD/oz,{price_cny} CNY/克"
     
     # CSV文件路径
     file_path = Path(f"/Users/peng.li24/minimax/gold/gold_{date_str}.csv")
@@ -155,13 +153,13 @@ def record_gold_price(price_info):
         # 检查文件是否存在，如果不存在则写入表头
         if not file_path.exists():
             with open(file_path, 'w', encoding='utf-8') as f:
-                f.write("时间,金价(USD/盎司),金价(CNY/克),来源\n")
+                f.write("时间,金价(USD/盎司),金价(CNY/克)\n")
         
         # 追加写入CSV记录
         with open(file_path, 'a', encoding='utf-8') as f:
             f.write(csv_line + "\n")
         
-        print(f"✅ 金价已记录: {time_str} - {price_usd} USD/oz ({price_cny} CNY/克) [{source}]")
+        print(f"✅ 金价已记录: {time_str} - {price_usd} USD/oz ({price_cny} CNY/克)")
         return True
     except Exception as e:
         print(f"❌ 记录失败: {e}")
