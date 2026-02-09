@@ -41,9 +41,6 @@ def get_usd_to_cny_rate():
                 return rates['CNY']
     except Exception as e:
         print(f"⚠️ 获取汇率失败: {e}")
-    
-    print("⚠️ 使用备用汇率: 7.2")
-    return 7.2
 
 def get_gold_price():
     """
