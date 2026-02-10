@@ -17,6 +17,18 @@ python3 gold_price_fetcher.py
 
 输出文件：脚本同目录下 gold_YYYY-MM-DD.csv
 
+运行卖出监控（读取 CSV）：
+
+python3 gold_sell_monitor.py --cost 1120
+
+可选参数：
+- --grams 持仓克数（默认 250）
+- --t1 止盈1（CNY/克）
+- --t2 止盈2（CNY/克）
+- --stop 止损（CNY/克）
+- --no-trade 不可交易区间（默认 02:00-09:10）
+- --poll 轮询秒数（默认 5）
+
 ## 数据格式
 
 CSV 列：时间,金价(USD/盎司),金价(CNY/克)
