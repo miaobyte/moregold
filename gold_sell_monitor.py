@@ -31,7 +31,10 @@ def regime(p):
     rsi14,atr14,atr50=rsi(p,14),atr(p,14),atr(p,50)
     adx14=adx(p,14);bb=bollinger(p,20)
     bbw=(bb[1]-bb[2])/bb[0] if bb else None
-    if adx14 is not None and adx14>25 and ma5 and ma20:return "趋势",ma5,ma20,rsi14,atr14,adx14,bb
+    if adx14 is not None and ma5 and ma20:
+        d="↑" if ma5>ma20 else "↓" if ma5<ma20 else "→"
+        s="强" if adx14>=30 else "弱" if adx14<20 else "中"
+        if adx14>25:return f"趋势{d}{s}",ma5,ma20,rsi14,atr14,adx14,bb
     if bbw is not None and bbw<0.01:return "震荡",ma5,ma20,rsi14,atr14,adx14,bb
     if atr14 and atr50 and atr14>atr50*1.3:return "高波动",ma5,ma20,rsi14,atr14,adx14,bb
     return "中性",ma5,ma20,rsi14,atr14,adx14,bb
@@ -79,7 +82,8 @@ def main():
         msg,sold,pnl=decide(p,usd,args,stats,peak,sold,prices)
         pnl_s=f" | 浮盈亏 {pnl:.2f} 元" if pnl is not None else ""
         ma5,ma20,rsi14,atr14,adx14,bb=stats[1:]
-        ind=f" MA5 {ma5:.2f} MA20 {ma20:.2f} RSI14 {rsi14:.1f} ADX14 {adx14:.1f} ATR14 {atr14:.2f}"
+        fmt=lambda v,f: f.format(v) if v is not None else "NA"
+        ind=f" MA5 {fmt(ma5,'{:.2f}')} MA20 {fmt(ma20,'{:.2f}')} RSI14 {fmt(rsi14,'{:.1f}')} ADX14 {fmt(adx14,'{:.1f}')} ATR14 {fmt(atr14,'{:.2f}')}"
         if bb:ind+=f" BB({bb[2]:.2f}-{bb[1]:.2f})"
         print(f"{msg} | {p} CNY/克 ({usd}){pnl_s} | 环境 {stats[0]} |{ind}")
         time.sleep(args.poll)
