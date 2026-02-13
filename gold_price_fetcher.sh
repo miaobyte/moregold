@@ -51,10 +51,7 @@ record(){
 
 while :; do
   now_s=$(date +%s)
-  min=$((10#$(date +%M)))
-  next_min=$(((min/5)*5))
-  next_s=$(date -j -f "%Y-%m-%d %H:%M:%S" "$(date +%F) $(date +%H):$(printf "%02d" "$next_min"):00" +%s)
-  [ $now_s -ge $next_s ] && next_s=$((next_s+300))
+  next_s=$((((now_s/300)+1)*300))
   sleep_s=$((next_s-now_s-LEAD_SECONDS))
   [ $sleep_s -gt 0 ] && sleep $sleep_s
   while [ $(date +%s) -lt $next_s ]; do
