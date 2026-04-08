@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 # 金价查询脚本：每5分钟记录一次
 
+export LC_ALL=C
+export LANG=C
+
 RATE_TTL=1800
 RATE_CACHE=
 RATE_TS=0
@@ -44,8 +47,9 @@ record(){
   date_str=$(date +%F)
   time_str=$(aligned_time)
   month_str=$(date +%Y-%m)
-  dir=$(cd "$(dirname "$0")" && pwd)
-  file="$dir/data/gold_${month_str}.csv"
+  root_dir=$(cd "$(dirname "$0")/../.." && pwd)
+  file="$root_dir/data/gold_${month_str}.csv"
+  mkdir -p "$(dirname "$file")"
   [ -f "$file" ] || printf "日期,时间,金价(USD),金价(CNY)\n" > "$file"
   printf "%s\n" "$date_str,$time_str,${price},${price_cny}" >> "$file"
   echo "✅ 金价已记录: $date_str,$time_str,$price,$price_cny"
