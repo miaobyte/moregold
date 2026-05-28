@@ -393,6 +393,189 @@ def print_n_trade_results(results, N, top_n=15):
 
 
 # ============================================================
+# 9. 通用收益计算函数（分解出的独立函数）
+# ============================================================
+
+def compute_trade_returns(csv_dir, schedule, min_weeks_ratio=0.4):
+    """
+    计算给定买入/卖出时间表的交易收益信息。
+
+    参数:
+        csv_dir: CSV 数据目录路径 (如 "data")
+        schedule: 交易时间数组，每个元素为 (buy_wd, buy_h, buy_m, sell_wd, sell_h, sell_m)
+                  其中 wd: 0=周一, 1=周二, 2=周三, 3=周四, 4=周五
+                  h: 小时, m: 分钟
+        min_weeks_ratio: 最低有效周数比例，默认 0.4
+
+    返回:
+        dict: {
+            "avg_return":    float,   # 周均总收益率
+            "n_weeks":       int,     # 有效交易周数
+            "total_weeks":   int,     # 总周数
+            "returns":       [float], # 每周总收益列表
+            "trade_rets":    [[float]], # 每笔交易各周收益
+            "win_rate":      float,   # 整体胜率
+            "max_r":         float,   # 最大周收益
+            "min_r":         float,   # 最小周收益
+            "std_r":         float,   # 周收益标准差
+            "schedule":      list,    # 交易时间表
+            "week_details":  [{       # 每周明细
+                "week_label": str,
+                "per_trade_rets": [float],
+                "total_ret": float,
+            }],
+            "per_trade_summary": [{   # 每笔交易汇总
+                "buy": str,           # "周二 23:10"
+                "sell": str,          # "周四 01:30"
+                "avg_return": float,
+                "win_rate": float,
+                "n_trades": int,
+            }],
+        }
+        如果有效周数不足则返回 None
+    """
+    if not os.path.isdir(csv_dir):
+        print(f"错误: 目录不存在: {csv_dir}")
+        return None
+
+    # 加载数据
+    records = load_data(csv_dir)
+    weekly = build_weekly(records)
+
+    N = len(schedule)
+    all_returns = []
+    trade_rets = [[] for _ in range(N)]
+    week_details = []
+
+    for wk, series in sorted(weekly.items()):
+        used = set()
+        executed = []
+        per_trade = []
+
+        for ti, (bw, bh, bm, sw, sh, sm) in enumerate(schedule):
+            # 寻找最近买入点
+            best_b, best_b_dist = None, float("inf")
+            for i, s in enumerate(series):
+                if i in used:
+                    continue
+                if s["wd"] == bw and s["h"] == bh:
+                    d = abs(s["m"] - bm)
+                    if d < best_b_dist:
+                        best_b_dist = d
+                        best_b = (i, s["price"])
+
+            if best_b is None:
+                break
+
+            # 寻找最近卖出点
+            best_s, best_s_dist = None, float("inf")
+            for i, s in enumerate(series):
+                if i in used or i <= best_b[0]:
+                    continue
+                if s["wd"] == sw and s["h"] == sh:
+                    d = abs(s["m"] - sm)
+                    if d < best_s_dist:
+                        best_s_dist = d
+                        best_s = (i, s["price"])
+
+            if best_s is None:
+                break
+
+            ret = (best_s[1] - best_b[1]) / best_b[1]
+            executed.append(ret)
+            per_trade.append(ret)
+            trade_rets[ti].append(ret)
+            used.add(best_b[0])
+            used.add(best_s[0])
+
+        if len(executed) == N:
+            all_returns.append(sum(executed))
+            week_details.append({
+                "week_label": f"{wk[0]}-W{wk[1]:02d}",
+                "per_trade_rets": per_trade,
+                "total_ret": sum(executed),
+            })
+
+    total_weeks = len(weekly)
+    min_weeks = max(3, total_weeks * min_weeks_ratio)
+
+    if len(all_returns) < min_weeks:
+        return None
+
+    # 每笔交易汇总
+    per_trade_summary = []
+    for ti, (bw, bh, bm, sw, sh, sm) in enumerate(schedule):
+        tr = trade_rets[ti]
+        per_trade_summary.append({
+            "buy": f"{WEEKDAY_NAMES[bw]} {bh:02d}:{bm:02d}",
+            "sell": f"{WEEKDAY_NAMES[sw]} {sh:02d}:{sm:02d}",
+            "avg_return": mean(tr),
+            "win_rate": sum(1 for x in tr if x > 0) / len(tr) if tr else 0,
+            "n_trades": len(tr),
+        })
+
+    return {
+        "avg_return": mean(all_returns),
+        "n_weeks": len(all_returns),
+        "total_weeks": total_weeks,
+        "returns": all_returns,
+        "trade_rets": trade_rets,
+        "win_rate": sum(1 for r in all_returns if r > 0) / len(all_returns),
+        "max_r": max(all_returns),
+        "min_r": min(all_returns),
+        "std_r": stdev(all_returns) if len(all_returns) >= 2 else 0,
+        "schedule": schedule,
+        "week_details": week_details,
+        "per_trade_summary": per_trade_summary,
+    }
+
+
+def print_trade_returns(result):
+    """格式化输出 compute_trade_returns 的结果。"""
+    if result is None:
+        print("\n❌ 有效交易周数不足，无法计算收益。")
+        return
+
+    print()
+    print("=" * 70)
+    print("📊 交易收益分析")
+    print("=" * 70)
+
+    # 交易时间
+    print("\n  📋 交易时间表:")
+    for i, ts in enumerate(result["per_trade_summary"]):
+        print(f"     交易{i+1}: 买入 {ts['buy']}  →  卖出 {ts['sell']}")
+
+    # 总体统计
+    print(f"\n  📈 总体统计:")
+    print(f"     覆盖周数: {result['n_weeks']} / {result['total_weeks']} 周")
+    print(f"     周均总收益: {result['avg_return']*100:+.2f}%")
+    print(f"     胜率: {result['win_rate']:.0%}")
+    print(f"     最大周收益: {result['max_r']*100:+.2f}%")
+    print(f"     最小周收益: {result['min_r']*100:+.2f}%")
+    print(f"     标准差: {result['std_r']*100:.2f}%")
+
+    # 每笔交易统计
+    print(f"\n  🔍 每笔交易统计:")
+    for i, ts in enumerate(result["per_trade_summary"]):
+        print(f"     交易{i+1} ({ts['buy']} → {ts['sell']}):")
+        print(f"         均值: {ts['avg_return']*100:+.2f}%, 胜率: {ts['win_rate']:.0%}, 笔数: {ts['n_trades']}")
+
+    # 最近10周明细
+    print(f"\n  📋 最近 {min(10, len(result['week_details']))} 周收益明细:")
+    print(f"     {'周':<12}", end="")
+    for i in range(len(result["schedule"])):
+        print(f" {'T'+str(i+1):>8}", end="")
+    print(f" {'合计':>8}")
+    print("     " + "-" * (12 + 9 * len(result["schedule"]) + 8))
+    for wd in result["week_details"][-10:]:
+        print(f"     {wd['week_label']:<12}", end="")
+        for rt in wd["per_trade_rets"]:
+            print(f" {rt*100:>+7.2f}%", end="")
+        print(f" {wd['total_ret']*100:>+7.2f}%")
+
+
+# ============================================================
 # Main
 # ============================================================
 
@@ -463,5 +646,28 @@ def main():
     print("\n✅ 完成。")
 
 
+def demo():
+    """演示: 调用 compute_trade_returns 计算 周二23:10买入 → 周四01:30卖出 的收益。"""
+    csv_dir = "data"
+
+    # 交易时间表: 周二 23:10 买入, 周四 01:30 卖出
+    # 周一=0, 周二=1, 周三=2, 周四=3, 周五=4
+    schedule = [
+        (1, 23, 10, 3, 1, 30),   # 周二 23:10 买入 → 周四 01:30 卖出
+    ]
+
+    print("=" * 70)
+    print("🎯 特定场景收益计算")
+    print("=" * 70)
+
+    result = compute_trade_returns(csv_dir, schedule)
+    print_trade_returns(result)
+    print("\n✅ 完成。")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--demo":
+        demo()
+    else:
+        main()
