@@ -1,4 +1,46 @@
+# Build
+bin/
+logs/
+
+# IDE
 .vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Node
 node_modules/*
-logs/*
+
+# Python
+__pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment variables (DO NOT COMMIT)
+.env
+.env.local
+.env.*.local
+
+# Model cache & checkpoints
+models/cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
