@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# 金价查询脚本：每5分钟记录一次
+# 金价查询脚本：每1分钟记录一次
 
 export LC_ALL=C
 export LANG=C
@@ -33,8 +33,7 @@ gold_price(){
 aligned_time(){
   h=$(date +%H)
   m=$(date +%M)
-  am=$((10#$m/5*5))
-  printf "%02d:%02d:00\n" "$h" "$am"
+  printf "%02d:%02d:00\n" "$h" "$m"
 }
 
 record(){
@@ -57,7 +56,7 @@ record(){
 
 while :; do
   now_s=$(date +%s)
-  next_s=$((((now_s/300)+1)*300))
+  next_s=$((((now_s/60)+1)*60))
   sleep_s=$((next_s-now_s-LEAD_SECONDS))
   [ $sleep_s -gt 0 ] && sleep $sleep_s
   while [ $(date +%s) -lt $next_s ]; do
