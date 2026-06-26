@@ -50,9 +50,10 @@ class WorldModelLoss(nn.Module):
         else:
             L_vol = torch.tensor(0.0, device=rlv.device)
 
-        # 环境分类
+        # 环境分类 (跳过 dummy/占位 head，仅当输出类别 ≥2 时计算)
+        has_regime = ("regime_logits" in pred and pred["regime_logits"].shape[-1] >= 2)
         L_regime = F.cross_entropy(pred["regime_logits"], target["Y_regime"]) \
-            if "regime_logits" in pred else torch.tensor(0.0, device=rlv.device)
+            if has_regime else torch.tensor(0.0, device=rlv.device)
 
         total = self.ld * L_dir + self.lr * L_ret + self.lv * L_vol + self.lg * L_regime
         comps = {"L_dir": L_dir.item(), "L_ret": L_ret.item(),
