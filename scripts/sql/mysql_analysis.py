@@ -30,10 +30,11 @@ from collections import defaultdict
 # ============================================================
 
 DB_CONFIG = {
-    "host": "localhost",
-    "user": "gold",
-    "password": "gold123",
-    "database": "gold_db",
+    "host": "bj-cdb-9ermqj8g.sql.tencentcdb.com",
+    "port": 26092,
+    "user": "gold_ro",
+    "password": "BNbQMsn4hhnmuw6P",
+    "database": "gold",
     "charset": "utf8mb4",
 }
 
@@ -161,33 +162,23 @@ def analyze_intraday_by_weekday(cursor):
     print("🕐 三、各星期几分时段走势（按小时）")
     print("=" * 70)
 
-    # 先获取每天开盘价
-    cursor.execute("""
-        CREATE TEMPORARY TABLE IF NOT EXISTS tmp_daily_open (
-            trade_date DATE PRIMARY KEY,
-            weekday TINYINT,
-            open_price DOUBLE
-        )
-    """)
-    cursor.execute("DELETE FROM tmp_daily_open")
-    cursor.execute("""
-        INSERT INTO tmp_daily_open (trade_date, weekday, open_price)
-        SELECT trade_date, weekday,
-               SUBSTRING_INDEX(GROUP_CONCAT(price_usd ORDER BY dt), ',', 1)
-        FROM gold_prices
-        WHERE weekday < 5
-        GROUP BY trade_date, weekday
-    """)
-
+    # 使用 CTE 替代临时表（腾讯云 MySQL 禁用 TEMPORARY TABLE）
     for wd in range(5):
         rows = fetchall(cursor, """
+            WITH daily_open AS (
+                SELECT trade_date, weekday,
+                       SUBSTRING_INDEX(GROUP_CONCAT(price_usd ORDER BY dt), ',', 1) AS open_price
+                FROM gold_prices
+                WHERE weekday < 5
+                GROUP BY trade_date, weekday
+            )
             SELECT
                 g.hour,
                 ROUND(AVG(g.price_usd), 2)   AS hour_avg,
                 COUNT(*)                      AS n,
                 ROUND(AVG((g.price_usd - d.open_price) / NULLIF(d.open_price, 0)), 6) AS rel
             FROM gold_prices g
-            JOIN tmp_daily_open d ON g.trade_date = d.trade_date
+            JOIN daily_open d ON g.trade_date = d.trade_date
             WHERE g.weekday = %s AND d.open_price > 0
             GROUP BY g.hour
             ORDER BY g.hour
@@ -209,8 +200,6 @@ def analyze_intraday_by_weekday(cursor):
                 arrow = "  ●"
             prev = avg
             print(f"    {hour:02d}:00  {avg:>12,.2f} {n:>7} {rel*100:>+9.2f}%{arrow}")
-
-    cursor.execute("DROP TEMPORARY TABLE IF EXISTS tmp_daily_open")
 
 
 # ============================================================
@@ -383,86 +372,60 @@ def evaluate_trade_schedule(cursor, schedule, min_weeks_ratio=0.4):
     # 获取总周数
     n_weeks = fetchone(cursor, "SELECT COUNT(DISTINCT year_week) FROM gold_prices")[0]
 
-    # 为每笔交易构建候选买入/卖出价临时表
-    # 结构: year_week, trade_idx, buy_price, sell_price
-    cursor.execute("DROP TEMPORARY TABLE IF EXISTS tmp_trade_prices")
-    cursor.execute("""
-        CREATE TEMPORARY TABLE tmp_trade_prices (
-            year_week INT,
-            trade_idx TINYINT,
-            buy_price DOUBLE,
-            sell_price DOUBLE,
-            buy_dt DATETIME,
-            sell_dt DATETIME,
-            PRIMARY KEY (year_week, trade_idx)
-        )
-    """)
-
+    # 构建 CTE 替代临时表：用 UNION ALL 组合每笔交易的买卖价
+    union_parts = []
+    params = []
     for ti, (bw, bh, bm, sw, sh, sm) in enumerate(schedule):
-        # 买入：找最接近目标分钟的 price
-        cursor.execute("""
-            INSERT IGNORE INTO tmp_trade_prices (year_week, trade_idx, buy_price, buy_dt)
-            SELECT year_week, %s, price_usd, dt
+        union_parts.append("""
+            SELECT %s AS trade_idx, year_week,
+                   buy_price, buy_dt, sell_price, sell_dt
             FROM (
-                SELECT year_week, price_usd, dt,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY year_week
-                           ORDER BY ABS(minute - %s), ABS(SECOND(dt))
-                       ) AS rn
-                FROM gold_prices
-                WHERE weekday = %s AND hour = %s
-            ) t WHERE rn = 1
-        """, [ti, bm, bw, bh])
+                SELECT b.year_week, b.price_usd AS buy_price, b.dt AS buy_dt,
+                       s.price_usd AS sell_price, s.dt AS sell_dt
+                FROM (
+                    SELECT year_week, price_usd, dt,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY year_week
+                               ORDER BY ABS(minute - %s), ABS(SECOND(dt))
+                           ) AS rn
+                    FROM gold_prices
+                    WHERE weekday = %s AND hour = %s
+                ) b
+                JOIN (
+                    SELECT year_week, price_usd, dt,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY year_week
+                               ORDER BY ABS(minute - %s), ABS(SECOND(dt))
+                           ) AS rn
+                    FROM gold_prices
+                    WHERE weekday = %s AND hour = %s
+                ) s ON b.year_week = s.year_week AND b.rn = 1 AND s.rn = 1
+            ) t
+        """)
+        params.extend([ti, bm, bw, bh, sm, sw, sh])
 
-        # 卖出：找最接近目标分钟的 price
-        cursor.execute("""
-            UPDATE tmp_trade_prices t
-            JOIN (
-                SELECT year_week, price_usd, dt,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY year_week
-                           ORDER BY ABS(minute - %s), ABS(SECOND(dt))
-                       ) AS rn
-                FROM gold_prices
-                WHERE weekday = %s AND hour = %s
-            ) s ON t.year_week = s.year_week AND s.rn = 1
-            SET t.sell_price = s.price_usd, t.sell_dt = s.dt
-            WHERE t.trade_idx = %s
-        """, [sm, sw, sh, ti])
-
-    # 计算收益
-    cursor.execute("""
-        CREATE TEMPORARY TABLE IF NOT EXISTS tmp_week_returns (
-            year_week INT PRIMARY KEY,
-            total_return DOUBLE,
-            n_trades INT
-        )
-    """)
-    cursor.execute("DELETE FROM tmp_week_returns")
-
-    cursor.execute("""
-        INSERT INTO tmp_week_returns (year_week, total_return, n_trades)
-        SELECT
-            year_week,
-            SUM((sell_price - buy_price) / NULLIF(buy_price, 0)) AS total_return,
-            COUNT(*) AS n_trades
-        FROM tmp_trade_prices
-        WHERE buy_price > 0 AND sell_price > 0 AND buy_dt < sell_dt
-        GROUP BY year_week
-        HAVING n_trades = %s
-    """, [N])
+    cte_sql = "WITH trade_prices AS (" + " UNION ALL ".join(union_parts) + ")"
 
     # 统计
-    row = fetchone(cursor, """
+    row = fetchone(cursor, cte_sql + """
         SELECT
-            COUNT(*)                                        AS n,
+            COUNT(DISTINCT year_week)                        AS n,
             ROUND(AVG(total_return), 6)                     AS avg_ret,
             SUM(CASE WHEN total_return > 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS win_rate,
             ROUND(MAX(total_return), 6)                     AS max_ret,
             ROUND(MIN(total_return), 6)                     AS min_ret,
             ROUND(STDDEV_SAMP(total_return), 6)              AS std_ret
-        FROM tmp_week_returns
-    """)
+        FROM (
+            SELECT
+                year_week,
+                SUM((sell_price - buy_price) / NULLIF(buy_price, 0)) AS total_return,
+                COUNT(*) AS n_trades
+            FROM trade_prices
+            WHERE buy_price > 0 AND sell_price > 0 AND buy_dt < sell_dt
+            GROUP BY year_week
+            HAVING n_trades = %s
+        ) wr
+    """, params + [N])
 
     min_weeks = max(3, n_weeks * min_weeks_ratio)
     if row is None or row[0] < min_weeks:
@@ -470,24 +433,28 @@ def evaluate_trade_schedule(cursor, schedule, min_weeks_ratio=0.4):
 
     n, avg_ret, win_rate, max_ret, min_ret, std_ret = row
 
-    # 每周明细
-    week_details = fetchall(cursor, """
-        SELECT year_week, total_return
-        FROM tmp_week_returns ORDER BY year_week DESC LIMIT 10
-    """)
+    # 每周明细 — 复用 CTE
+    week_details = fetchall(cursor, cte_sql + """
+        SELECT year_week, SUM((sell_price - buy_price) / NULLIF(buy_price, 0)) AS total_return
+        FROM trade_prices
+        WHERE buy_price > 0 AND sell_price > 0 AND buy_dt < sell_dt
+        GROUP BY year_week
+        HAVING COUNT(*) = %s
+        ORDER BY year_week DESC LIMIT 10
+    """, params + [N])
 
-    # 每笔统计
+    # 每笔统计 — 复用 CTE
     per_trade = []
     for ti in range(N):
-        tr = fetchone(cursor, """
+        tr = fetchone(cursor, cte_sql + """
             SELECT
                 ROUND(AVG((sell_price - buy_price) / NULLIF(buy_price, 0)), 6),
                 SUM(CASE WHEN sell_price > buy_price THEN 1 ELSE 0 END)*1.0/COUNT(*),
                 COUNT(*)
-            FROM tmp_trade_prices
+            FROM trade_prices
             WHERE trade_idx = %s
               AND buy_price > 0 AND sell_price > 0 AND buy_dt < sell_dt
-        """, [ti])
+        """, params + [ti])
         if tr:
             bw, bh, bm, sw, sh, sm = schedule[ti]
             per_trade.append({
@@ -550,97 +517,160 @@ ALL_HOURS = list(range(10, 24)) + [0, 1]
 
 
 def enumerate_single_trades(cursor):
-    """枚举所有单笔交易策略并评估，返回排序后的结果列表。"""
+    """枚举所有单笔交易策略并评估（单次 CTE 批量查询）。"""
+    print(f"  📊 批量评估单笔交易策略...")
+
+    # 使用单次 CTE 查询评估所有 (weekday, hour) 组合
+    # 买入分钟固定 10，卖出分钟固定 50
+    rows = fetchall(cursor, """
+        WITH buy_prices AS (
+            SELECT year_week, weekday AS buy_wd, hour AS buy_h,
+                   price_usd AS buy_price, dt AS buy_dt,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY year_week, weekday, hour
+                       ORDER BY ABS(minute - 10), ABS(SECOND(dt))
+                   ) AS rn
+            FROM gold_prices WHERE weekday < 5
+        ),
+        sell_prices AS (
+            SELECT year_week, weekday AS sell_wd, hour AS sell_h,
+                   price_usd AS sell_price, dt AS sell_dt,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY year_week, weekday, hour
+                       ORDER BY ABS(minute - 50), ABS(SECOND(dt))
+                   ) AS rn
+            FROM gold_prices WHERE weekday < 5
+        )
+        SELECT b.buy_wd, b.buy_h, s.sell_wd, s.sell_h,
+               COUNT(*) AS n_weeks,
+               ROUND(AVG((s.sell_price - b.buy_price) / NULLIF(b.buy_price, 0)), 6) AS avg_return,
+               ROUND(SUM(CASE WHEN s.sell_price > b.buy_price THEN 1 ELSE 0 END) / COUNT(*), 6) AS win_rate,
+               ROUND(MAX((s.sell_price - b.buy_price) / NULLIF(b.buy_price, 0)), 6) AS max_r,
+               ROUND(MIN((s.sell_price - b.buy_price) / NULLIF(b.buy_price, 0)), 6) AS min_r,
+               ROUND(STDDEV_SAMP((s.sell_price - b.buy_price) / NULLIF(b.buy_price, 0)), 6) AS std_r
+        FROM buy_prices b
+        JOIN sell_prices s ON b.year_week = s.year_week
+        WHERE b.rn = 1 AND s.rn = 1 AND b.buy_dt < s.sell_dt
+        GROUP BY b.buy_wd, b.buy_h, s.sell_wd, s.sell_h
+        HAVING n_weeks >= 10
+    """)
+
     results = []
-    total = 0
-
-    # 计算总数
-    for bw in range(5):
-        for sw in range(bw, 5):
-            for bh in ALL_HOURS:
-                for sh in ALL_HOURS:
-                    if bw * 2400 + bh * 60 + 10 >= sw * 2400 + sh * 60 + 50:
-                        continue
-                    total += 1
-
-    print(f"  📊 枚举 {total} 个单笔候选策略...")
-    count = 0
-
-    for bw in range(5):
-        for sw in range(bw, 5):
-            for bh in ALL_HOURS:
-                for sh in ALL_HOURS:
-                    bo = bw * 2400 + bh * 60 + 10
-                    so = sw * 2400 + sh * 60 + 50
-                    if bo >= so:
-                        continue
-
-                    count += 1
-                    if count % 200 == 0:
-                        print(f"  ... {count}/{total}")
-
-                    r = evaluate_trade_schedule(
-                        cursor, [(bw, bh, 10, sw, sh, 50)],
-                        min_weeks_ratio=0.5,
-                    )
-                    if r:
-                        results.append({
-                            "buy": f"{WEEKDAY_NAMES[bw]} {bh:02d}:10",
-                            "sell": f"{WEEKDAY_NAMES[sw]} {sh:02d}:50",
-                            "bw": bw, "bh": bh, "sw": sw, "sh": sh,
-                            "buy_order": bo, "sell_order": so,
-                            "avg_return": r["avg_return"],
-                            "win_rate": r["win_rate"],
-                            "n_weeks": r["n_weeks"],
-                            "max_r": r["max_r"],
-                            "min_r": r["min_r"],
-                            "std_r": r["std_r"],
-                            "schedule": [(bw, bh, 10, sw, sh, 50)],
-                            "result": r,
-                        })
+    for buy_wd, buy_h, sell_wd, sell_h, n_weeks, avg_ret, win_rate, max_r, min_r, std_r in rows:
+        bo = buy_wd * 2400 + buy_h * 60 + 10
+        so = sell_wd * 2400 + sell_h * 60 + 50
+        if bo >= so:
+            continue
+        results.append({
+            "buy": f"{WEEKDAY_NAMES[buy_wd]} {buy_h:02d}:10",
+            "sell": f"{WEEKDAY_NAMES[sell_wd]} {sell_h:02d}:50",
+            "bw": buy_wd, "bh": buy_h, "sw": sell_wd, "sh": sell_h,
+            "buy_order": bo, "sell_order": so,
+            "avg_return": avg_ret,
+            "win_rate": win_rate,
+            "n_weeks": n_weeks,
+            "max_r": max_r,
+            "min_r": min_r,
+            "std_r": std_r or 0,
+            "schedule": [(buy_wd, buy_h, 10, sell_wd, sell_h, 50)],
+            "result": {
+                "avg_return": avg_ret, "n_weeks": n_weeks,
+                "win_rate": win_rate, "max_r": max_r,
+                "min_r": min_r, "std_r": std_r or 0,
+            },
+        })
 
     results.sort(key=lambda x: -x["avg_return"])
-    print(f"  有效单笔策略: {len(results)} 个")
+    print(f"  有效单笔策略: {len(results)} 个 (批量CTE)")
     return results
-
-
-def combine_pair_strategies(cursor, single_results, top_k=100):
-    """从 top 单笔策略中组合出有效的 2 笔交易策略。"""
+def evaluate_pairs_batch(cursor, single_results, top_k=50):
+    """批量 CTE 评估两笔交易组合 —— 替代逐对循环。"""
     candidates = single_results[:top_k]
+    print(f"  📊 批量评估 2 笔组合 (Top {top_k} 单笔)...")
 
-    # 生成所有 2 组合，约束 sell1 < buy2
-    combos = []
-    n = len(candidates)
-    for i in range(n):
-        a = candidates[i]
-        for j in range(n):
+    if len(candidates) < 2:
+        return []
+
+    # 构建 (sell1 < buy2) 组合的过滤条件
+    pair_conds = []
+    for i, a in enumerate(candidates):
+        for j, b in enumerate(candidates):
             if i == j:
                 continue
-            b = candidates[j]
-            # 约束: 第一笔卖出 < 第二笔买入，且两天不重叠
             if a["sell_order"] < b["buy_order"]:
-                combos.append((a, b))
+                # 条件: sr1.buy_wd=a.bw AND sr1.buy_h=a.bh AND sr1.sell_wd=a.sw AND sr1.sell_h=a.sh
+                #   AND sr2.buy_wd=b.bw AND sr2.buy_h=b.bh AND sr2.sell_wd=b.sw AND sr2.sell_h=b.sh
+                pair_conds.append(
+                    f"(p1.buy_wd={a['bw']} AND p1.buy_h={a['bh']} AND p1.sell_wd={a['sw']} AND p1.sell_h={a['sh']} AND "
+                    f" p2.buy_wd={b['bw']} AND p2.buy_h={b['bh']} AND p2.sell_wd={b['sw']} AND p2.sell_h={b['sh']})"
+                )
 
-    # 去重
-    seen = set()
-    unique = []
-    for a, b in combos:
-        k = (a["bw"], a["bh"], a["sw"], a["sh"],
-             b["bw"], b["bh"], b["sw"], b["sh"])
-        if k not in seen:
-            seen.add(k)
-            unique.append((a, b))
+    if not pair_conds:
+        print("  无有效 2 笔组合")
+        return []
 
-    return unique
+    print(f"  有效 2 笔组合: {len(pair_conds)} 个，批量评估中...")
 
+    where_clause = " OR ".join(pair_conds)
 
-def evaluate_pair(cursor, a, b):
-    """评估一笔 2 交易组合。"""
-    sched = [
-        (a["bw"], a["bh"], 10, a["sw"], a["sh"], 50),
-        (b["bw"], b["bh"], 10, b["sw"], b["sh"], 50),
-    ]
-    return evaluate_trade_schedule(cursor, sched, min_weeks_ratio=0.4)
+    sql = f"""
+    WITH single_returns AS (
+        SELECT b.year_week,
+               b.weekday AS buy_wd, b.hour AS buy_h,
+               s.weekday AS sell_wd, s.hour AS sell_h,
+               (s.price_usd - b.price_usd) / NULLIF(b.price_usd, 0) AS ret
+        FROM (
+            SELECT year_week, weekday, hour, price_usd, dt,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY year_week, weekday, hour
+                       ORDER BY ABS(minute - 10), ABS(SECOND(dt))
+                   ) AS rn
+            FROM gold_prices WHERE weekday < 5
+        ) b
+        JOIN (
+            SELECT year_week, weekday, hour, price_usd, dt,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY year_week, weekday, hour
+                       ORDER BY ABS(minute - 50), ABS(SECOND(dt))
+                   ) AS rn
+            FROM gold_prices WHERE weekday < 5
+        ) s ON b.year_week = s.year_week
+        WHERE b.rn = 1 AND s.rn = 1
+          AND (b.weekday * 2400 + b.hour * 60 + 10) < (s.weekday * 2400 + s.hour * 60 + 50)
+    )
+    SELECT p1.buy_wd, p1.buy_h, p1.sell_wd, p1.sell_h,
+           p2.buy_wd, p2.buy_h, p2.sell_wd, p2.sell_h,
+           COUNT(*) AS n_weeks,
+           ROUND(AVG(p1.ret + p2.ret), 6) AS avg_return,
+           ROUND(SUM(CASE WHEN p1.ret + p2.ret > 0 THEN 1 ELSE 0 END) / COUNT(*), 6) AS win_rate,
+           ROUND(MAX(p1.ret + p2.ret), 6) AS max_r,
+           ROUND(MIN(p1.ret + p2.ret), 6) AS min_r,
+           ROUND(STDDEV_SAMP(p1.ret + p2.ret), 6) AS std_r
+    FROM single_returns p1
+    JOIN single_returns p2 ON p1.year_week = p2.year_week
+    WHERE ({where_clause})
+    GROUP BY p1.buy_wd, p1.buy_h, p1.sell_wd, p1.sell_h,
+             p2.buy_wd, p2.buy_h, p2.sell_wd, p2.sell_h
+    HAVING n_weeks >= 8
+    ORDER BY avg_return DESC
+    LIMIT 50
+    """
+
+    rows = fetchall(cursor, sql)
+
+    results = []
+    for bw1, bh1, sw1, sh1, bw2, bh2, sw2, sh2, n_w, avg_r, wr, mx, mn, std in rows:
+        results.append({
+            "buy1": f"{WEEKDAY_NAMES[bw1]} {bh1:02d}:10",
+            "sell1": f"{WEEKDAY_NAMES[sw1]} {sh1:02d}:50",
+            "buy2": f"{WEEKDAY_NAMES[bw2]} {bh2:02d}:10",
+            "sell2": f"{WEEKDAY_NAMES[sw2]} {sh2:02d}:50",
+            "avg_return": avg_r, "win_rate": wr, "n_weeks": n_w,
+            "max_r": mx, "min_r": mn, "std_r": std or 0,
+        })
+
+    print(f"  有效 2 笔策略: {len(results)} 个 (批量CTE)")
+    return results
 
 
 def print_rank_table(results, n_trades, top_n=20):
@@ -678,36 +708,12 @@ def rank_strategies(cursor):
     single_results = enumerate_single_trades(cursor)
     print_rank_table(single_results, 1, top_n=20)
 
-    # ---- 阶段 2: 两笔交易组合 ----
+    # ---- 阶段 2: 两笔交易组合（批量 CTE）----
     print(f"\n  {'=' * 60}")
-    print(f"  🔗 阶段 2: 从 Top 200 单笔策略组合 2 笔交易...")
+    print(f"  🔗 阶段 2: 从 Top 200 单笔策略批量评估 2 笔交易...")
     print(f"  {'=' * 60}")
 
-    pair_combos = combine_pair_strategies(cursor, single_results, top_k=200)
-    print(f"  有效 2 笔组合: {len(pair_combos)} 个")
-
-    pair_results = []
-    print(f"  评估中...")
-    for idx, (a, b) in enumerate(pair_combos):
-        if idx % 1000 == 0 and idx > 0:
-            print(f"  ... {idx}/{len(pair_combos)}")
-
-        r = evaluate_pair(cursor, a, b)
-        if r:
-            pair_results.append({
-                "buy1": a["buy"], "sell1": a["sell"],
-                "buy2": b["buy"], "sell2": b["sell"],
-                "avg_return": r["avg_return"],
-                "win_rate": r["win_rate"],
-                "n_weeks": r["n_weeks"],
-                "max_r": r["max_r"],
-                "min_r": r["min_r"],
-                "std_r": r["std_r"],
-                "result": r,
-            })
-
-    pair_results.sort(key=lambda x: -x["avg_return"])
-    print(f"  有效 2 笔策略: {len(pair_results)} 个")
+    pair_results = evaluate_pairs_batch(cursor, single_results, top_k=50)
     print_rank_table(pair_results, 2, top_n=20)
 
     # ---- 阶段 3: 对比与最优详情 ----
@@ -734,7 +740,11 @@ def rank_strategies(cursor):
     # 最优 2 笔详情
     if pair_results:
         print(f"\n  🏆 最优 2 笔策略详情:")
-        print_trade_result(pair_results[0]["result"])
+        print(f"     交易1: {pair_results[0]['buy1']} → {pair_results[0]['sell1']}")
+        print(f"     交易2: {pair_results[0]['buy2']} → {pair_results[0]['sell2']}")
+        print(f"     周均 +{pair_results[0]['avg_return']*100:.2f}%, "
+              f"胜率 {pair_results[0]['win_rate']:.0%}, "
+              f"覆盖 {pair_results[0]['n_weeks']} 周")
 
     return {"single": single_results, "pair": pair_results}
 
