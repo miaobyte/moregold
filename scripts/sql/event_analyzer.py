@@ -11,7 +11,7 @@
 流程:
   1. 从 gold_prices 提取时间段内的价格数据
   2. 用滑动窗口检测急涨/急跌/跳空/突破/反转
-  3. 写入 gold_event 表 (source='AUTO')
+  3. 写入 world_event 表 (source='AUTO')
   4. 输出检测到的事件摘要
 """
 
@@ -41,36 +41,19 @@ def _db_config():
 # ============================================================
 
 EVENT_TABLE_DDL = """
-CREATE TABLE IF NOT EXISTS gold_event (
-    id            BIGINT AUTO_INCREMENT PRIMARY KEY,
-    start_dt      DATETIME     NOT NULL COMMENT '事件起始',
-    end_dt        DATETIME     NOT NULL COMMENT '事件结束',
-    start_price   DOUBLE       NOT NULL,
-    end_price     DOUBLE       NOT NULL,
-    change_pct    DOUBLE       NOT NULL COMMENT '涨跌幅%',
-    peak_price    DOUBLE       DEFAULT NULL,
-    valley_price  DOUBLE       DEFAULT NULL,
-    event_type    VARCHAR(32)  NOT NULL,
-    direction     ENUM('UP','DOWN','SHAKE') NOT NULL,
-    severity      TINYINT      NOT NULL COMMENT '1-5',
-    cause_cat     VARCHAR(64)  DEFAULT NULL,
-    cause_detail  VARCHAR(512) DEFAULT NULL,
-    news_url      VARCHAR(1024) DEFAULT NULL,
-    related_event VARCHAR(128) DEFAULT NULL,
-    rsi14         DOUBLE       DEFAULT NULL,
-    atr14         DOUBLE       DEFAULT NULL,
-    sma20         DOUBLE       DEFAULT NULL,
-    tags          VARCHAR(256) DEFAULT NULL,
-    notes         TEXT         DEFAULT NULL,
-    source        ENUM('AUTO','MANUAL') NOT NULL DEFAULT 'AUTO',
-    created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
-    updated_at    DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_time (start_dt),
-    INDEX idx_type (event_type),
-    INDEX idx_direction (direction),
-    INDEX idx_severity (severity),
-    INDEX idx_cause (cause_cat)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='金价波动事件表';
+CREATE TABLE IF NOT EXISTS world_event (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    event_dt        DATETIME     NOT NULL COMMENT '事件发生时间',
+    event_type      VARCHAR(32)  NOT NULL COMMENT '事件类型',
+    severity        TINYINT      NOT NULL COMMENT '1-5',
+    cause_detail    VARCHAR(512) DEFAULT NULL COMMENT '事件详情/原因',
+    source          ENUM('AUTO','MANUAL') NOT NULL DEFAULT 'AUTO',
+    created_at      DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    predictability  FLOAT        NOT NULL DEFAULT 0 COMMENT '可预测度 0-1',
+    event_value     DOUBLE       DEFAULT NULL COMMENT '事件关联数值(涨跌幅等)',
+    INDEX idx_event_dt (event_dt),
+    INDEX idx_type (event_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='全球事件表';
 """
 
 # ============================================================
@@ -249,16 +232,15 @@ def insert_events(cursor, events):
     dmin = min(e["start_dt"] for e in events)
     dmax = max(e["end_dt"] for e in events)
     cursor.execute(
-        "DELETE FROM gold_event WHERE source='AUTO' AND start_dt >= %s AND end_dt <= %s",
+        "DELETE FROM world_event WHERE source='AUTO' AND event_dt >= %s AND event_dt <= %s",
         (dmin, dmax)
     )
 
     sql = """
-        INSERT INTO gold_event
-            (start_dt, end_dt, start_price, end_price, change_pct,
-             event_type, direction, severity)
-        VALUES (%(start_dt)s, %(end_dt)s, %(start_price)s, %(end_price)s,
-                %(change_pct)s, %(event_type)s, %(direction)s, %(severity)s)
+        INSERT INTO world_event
+            (event_dt, event_type, severity, cause_detail, source, predictability, event_value)
+        VALUES (%(start_dt)s, %(event_type)s, %(severity)s,
+                %(event_type)s, 'AUTO', 0, %(change_pct)s)
     """
     cursor.executemany(sql, events)
     return cursor.rowcount
@@ -270,24 +252,23 @@ def insert_events(cursor, events):
 
 def print_events(cursor, start, end):
     cursor.execute("""
-        SELECT id, start_dt, end_dt, ROUND(change_pct,2),
-               event_type, direction, severity,
-               COALESCE(cause_cat,'AUTO') AS cause_cat,
-               COALESCE(cause_detail,'(待标注)') AS cause_detail
-        FROM gold_event
-        WHERE start_dt >= %s AND end_dt <= %s
-        ORDER BY ABS(change_pct) DESC
+        SELECT ev.id, ev.event_dt, ev.event_type, ev.severity,
+               ev.change_pct, ev.direction,
+               COALESCE(ev.cause_detail,'(待标注)') AS cause_detail
+        FROM vw_world_event ev
+        WHERE ev.event_dt >= %s AND ev.event_dt <= %s
+        ORDER BY ABS(ev.change_pct) DESC
     """, (start, end))
     rows = cursor.fetchall()
     if not rows:
         print("  (无事件)")
         return
 
-    print(f"\n  {'id':<6} {'时间':<22} {'类型':<14} {'方向':<6} {'涨跌':>8} {'严重':>4} {'原因':<20} {'详情'}")
-    print("  " + "-" * 100)
+    print(f"\n  {'id':<6} {'时间':<22} {'类型':<14} {'严重':>4} {'涨跌':>8} {'详情'}")
+    print("  " + "-" * 80)
     for r in rows:
-        dt_range = f"{str(r[1])[5:16]} ~ {str(r[2])[11:16]}"
-        print(f"  {r[0]:<6} {dt_range:<22} {r[4]:<14} {r[5]:<6} {r[3]:>+7.2f}% {r[6]:>4}  {r[7]:<20} {r[8][:30]}")
+        dt = str(r[1])[5:19]
+        print(f"  {r[0]:<6} {dt:<22} {r[2]:<14} {r[3]:>4} {r[4]:>+7.2f}%  {r[5][:40]}")
 
 
 # ============================================================
@@ -330,9 +311,9 @@ def main():
     cur.execute("SET SESSION group_concat_max_len = 1000000")
 
     # 检查表是否存在
-    cur.execute("SHOW TABLES LIKE 'gold_event'")
+    cur.execute("SHOW TABLES LIKE 'world_event'")
     if not cur.fetchone():
-        print("❌ gold_event 表不存在，请先执行 event_analyzer.py 中的建表 SQL")
+        print("❌ world_event 表不存在，请先执行 event_analyzer.py 中的建表 SQL")
         print("   (建表语句在脚本顶部的 EVENT_TABLE_DDL 变量中)")
         cur.close()
         conn.close()
@@ -384,7 +365,7 @@ def main():
     if all_events and not args.dry_run:
         n = insert_events(cur, all_events)
         conn.commit()
-        print(f"\n✅ 已写入 {n} 条事件到 gold_event")
+        print(f"\n✅ 已写入 {n} 条事件到 world_event")
 
     # 5. 输出
     print_events(cur, start, end)
