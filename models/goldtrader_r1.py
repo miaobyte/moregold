@@ -26,7 +26,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 # ---- 公共模块 ----
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,6 +44,22 @@ from models.common import (
     MultiPhaseTrainer,
     WorldModelLoss,
 )
+
+
+# ============================================================
+# 兼容层: RMSNorm (PyTorch <2.2 无此内置层)
+# ============================================================
+
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization."""
+    def __init__(self, d_model, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d_model))
+        self.eps = eps
+
+    def forward(self, x):
+        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return x * rms * self.weight
 
 
 # ============================================================
@@ -84,10 +103,10 @@ class Mamba2Block(nn.Module):
     def __init__(self, d_model, d_state, n_heads, dropout=0.1):
         super().__init__()
         self.ssd = Mamba2SSD(d_model, d_state, n_heads)
-        self.norm1 = nn.RMSNorm(d_model)
+        self.norm1 = RMSNorm(d_model)
         self.gate_proj = nn.Linear(d_model, d_model * 2)
         self.down_proj = nn.Linear(d_model, d_model)
-        self.norm2 = nn.RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -152,9 +171,9 @@ class MoEChannelAttnBlock(nn.Module):
     def __init__(self, d_model, n_heads=8, n_experts=8, top_k=2, dropout=0.1):
         super().__init__()
         self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
-        self.norm1 = nn.RMSNorm(d_model)
+        self.norm1 = RMSNorm(d_model)
         self.moe = MixtureOfExperts(d_model, n_experts, top_k, dropout)
-        self.norm2 = nn.RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
 
     def forward(self, x):
         B, NP, C, D = x.shape
@@ -174,9 +193,9 @@ class GriffinLocalBlock(nn.Module):
         self.window_size = window_size
         self.a_param = nn.Parameter(torch.randn(d_model))
         self.gate = nn.Sequential(nn.Linear(d_model * 2, d_model), nn.Sigmoid())
-        self.norm1 = nn.RMSNorm(d_model)
+        self.norm1 = RMSNorm(d_model)
         self.local_attn = nn.MultiheadAttention(d_model, num_heads=4, dropout=dropout, batch_first=True)
-        self.norm2 = nn.RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
 
     def forward(self, x):
         B, NP, D = x.shape
@@ -222,9 +241,9 @@ class KANLinear(nn.Module):
         super().__init__()
         self.in_f, self.out_f, self.gs, self.so = in_f, out_f, grid_size, spline_order
         self.base_w = nn.Parameter(torch.randn(out_f, in_f) * 0.1)
-        self.spline_w = nn.Parameter(torch.randn(out_f, in_f, grid_size + spline_order) * 0.1)
+        self.spline_w = nn.Parameter(torch.randn(out_f, in_f, grid_size + 2 * spline_order + 1) * 0.1)
         self.spline_s = nn.Parameter(torch.ones(out_f, in_f))
-        h = (grid_size + spline_order - 1) / grid_size
+        h = (grid_size + 2 * spline_order) / grid_size
         self.register_buffer("grid", torch.linspace(-h, h, grid_size + 2 * spline_order + 1))
 
     def forward(self, x):
@@ -250,7 +269,7 @@ class TemporalCrossAttention(nn.Module):
     def __init__(self, d_model, n_heads=8, dropout=0.1):
         super().__init__()
         self.cross_attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
-        self.norm = nn.RMSNorm(d_model)
+        self.norm = RMSNorm(d_model)
 
     def forward(self, ctx, hidden):
         out, aw = self.cross_attn(ctx.unsqueeze(1), hidden, hidden)
@@ -310,7 +329,7 @@ class GoldTraderR1(nn.Module):
         )
 
         # ---- 预测 Heads ----
-        self.pool = nn.Sequential(nn.RMSNorm(D), nn.Linear(D, D), nn.GELU())
+        self.pool = nn.Sequential(RMSNorm(D), nn.Linear(D, D), nn.GELU())
         self.h_dir  = nn.Linear(D, H)
         self.h_ret  = nn.Linear(D, H)
         self.h_lvar = nn.Linear(D, H)
@@ -322,12 +341,12 @@ class GoldTraderR1(nn.Module):
         )
 
         # ---- 决策上下文 ----
-        self.pred_proj = nn.Linear(H * 4, D)
+        self.pred_proj = nn.Linear(H * 5, D)
         self.regime_embed = nn.Embedding(cfg.n_regimes, D)
         self.macro_encoder = nn.Sequential(nn.Linear(5, D // 2), nn.GELU(), nn.Linear(D // 2, D))
         self.decision_context = nn.Sequential(
             nn.Linear(D * 4, D * 2), nn.GELU(), nn.Dropout(cfg.dropout),
-            nn.Linear(D * 2, D), nn.RMSNorm(D),
+            nn.Linear(D * 2, D), RMSNorm(D),
         )
         self.temporal_cross_attn = TemporalCrossAttention(D, cfg.n_heads)
         self.portfolio_encoder = nn.Sequential(
@@ -335,7 +354,7 @@ class GoldTraderR1(nn.Module):
         )
 
         # ---- KAN 策略头 ----
-        self.decision_fusion = nn.Sequential(nn.Linear(D * 2, D), nn.GELU(), nn.RMSNorm(D))
+        self.decision_fusion = nn.Sequential(nn.Linear(D * 2, D), nn.GELU(), RMSNorm(D))
         self.kan_dir = KANStrategyHead(D, D // 4, 3)
         self.kan_pos = KANStrategyHead(D, D // 4, 1)
         self.kan_sl  = KANStrategyHead(D, D // 4, 1)
@@ -370,7 +389,7 @@ class GoldTraderR1(nn.Module):
         pred_emb = self.pred_proj(preds)
         regime_emb = self.regime_embed(regime_logits.argmax(dim=-1))
         macro_emb = self.macro_encoder(macro_state) if macro_state is not None else \
-                    torch.zeros(features.size(0), self.pred_proj.out_features // 4, device=features.device)
+                    torch.zeros(features.size(0), self.pred_proj.out_features, device=features.device)
 
         ctx = self.decision_context(torch.cat([pred_emb, regime_emb, pooled, macro_emb], dim=-1))
         ctx, attn = self.temporal_cross_attn(ctx, hidden)
@@ -457,37 +476,66 @@ def main():
     parser.add_argument("--force-reload", action="store_true")
     args = parser.parse_args()
 
+    # ---- DDP 初始化 (auto-detect via LOCAL_RANK) ----
+    ddp = "LOCAL_RANK" in os.environ
+    if ddp:
+        dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+    else:
+        local_rank = 0
+        world_size = 1
+        rank = 0
+    is_master = (rank == 0)
+
     cfg = GoldTraderR1Config()
     cfg.seq_len = args.seq_len; cfg.d_model = args.d_model
     cfg.batch_size = args.batch_size
     cfg.lr_p1 = cfg.lr_p2 = cfg.lr_p3 = args.lr
     cfg.epochs_p1 = args.epochs
-    cfg.device = args.device if torch.cuda.is_available() else "cpu"
+    cfg.device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
     cfg.dtype = "float16" if args.fp16 else "bfloat16"
 
-    torch.manual_seed(cfg.seed); np.random.seed(cfg.seed)
-    if torch.cuda.is_available(): torch.cuda.manual_seed_all(cfg.seed)
+    torch.manual_seed(cfg.seed + rank); np.random.seed(cfg.seed + rank)
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(cfg.seed + rank)
 
-    print("🥇 GoldTrader-R1 — Mamba-2 + iTransformer/MoE + Griffin + KAN (公共模块版)")
-    print(f"   seq={cfg.seq_len} | d={cfg.d_model} | features={cfg.n_features}")
-    print(f"   mamba_layers={cfg.n_mamba_layers} | moe_layers={cfg.n_moe_layers} | experts={cfg.n_experts}")
-    print(f"   use_future_vol={cfg.use_future_vol} ✅")
+    if is_master:
+        print("🥇 GoldTrader-R1 — Mamba-2 + iTransformer/MoE + Griffin + KAN (公共模块版)")
+        print(f"   seq={cfg.seq_len} | d={cfg.d_model} | features={cfg.n_features}")
+        print(f"   mamba_layers={cfg.n_mamba_layers} | moe_layers={cfg.n_moe_layers} | experts={cfg.n_experts}")
+        print(f"   use_future_vol={cfg.use_future_vol} ✅")
+        if ddp:
+            print(f"   🔗 DDP: {world_size} GPUs")
 
     # ---- 数据 ----
-    print(f"\n{'='*60}")
+    if is_master:
+        print(f"\n{'='*60}")
     engine = DataEngine(cfg, force_reload=args.force_reload, cache_name="goldtrader_r1_features.npz")
     tr_ds = GoldDataset(engine, "train", phase=args.phase, seq_len=cfg.seq_len)
     va_ds = GoldDataset(engine, "val",   phase=args.phase, seq_len=cfg.seq_len)
     te_ds = GoldDataset(engine, "test",  phase=args.phase, seq_len=cfg.seq_len)
 
-    tr_ldr = DataLoader(tr_ds, cfg.batch_size, shuffle=True,  num_workers=4, pin_memory=True, drop_last=True)
-    va_ldr = DataLoader(va_ds, cfg.batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    te_ldr = DataLoader(te_ds, cfg.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    if ddp:
+        tr_sampler = DistributedSampler(tr_ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
+        va_sampler = DistributedSampler(va_ds, num_replicas=world_size, rank=rank, shuffle=False)
+        te_sampler = DistributedSampler(te_ds, num_replicas=world_size, rank=rank, shuffle=False)
+        tr_ldr = DataLoader(tr_ds, cfg.batch_size, sampler=tr_sampler, num_workers=0, pin_memory=False, drop_last=True)
+        va_ldr = DataLoader(va_ds, cfg.batch_size, sampler=va_sampler, num_workers=0, pin_memory=False)
+        te_ldr = DataLoader(te_ds, cfg.batch_size, sampler=te_sampler, num_workers=0, pin_memory=False)
+    else:
+        tr_ldr = DataLoader(tr_ds, cfg.batch_size, shuffle=True,  num_workers=0, pin_memory=False, drop_last=True)
+        va_ldr = DataLoader(va_ds, cfg.batch_size, shuffle=False, num_workers=0, pin_memory=False)
+        te_ldr = DataLoader(te_ds, cfg.batch_size, shuffle=False, num_workers=0, pin_memory=False)
 
     # ---- 模型 ----
     model = GoldTraderR1(cfg).to(cfg.device)
-    np = sum(p.numel() for p in model.parameters())
-    print(f"\n🧠 GoldTrader-R1: {np:,} 参数 ({np/1e6:.1f}M)\n")
+    if ddp:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    if is_master:
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"\n🧠 GoldTrader-R1: {n_params:,} 参数 ({n_params/1e6:.1f}M)\n")
 
     # ---- 训练 ----
     w_loss = WorldModelLoss(cfg.lambda_dir, cfg.lambda_ret, cfg.lambda_vol, cfg.lambda_regime)
@@ -495,10 +543,15 @@ def main():
     da_loss = DecisionAwareLoss(cfg.lam_da)
 
     trainer = MultiPhaseTrainer(model, cfg, tr_ldr, va_ldr, te_ldr,
-                                loss_fn=w_loss, policy_loss_fn=p_loss, da_loss_fn=da_loss)
-    trainer.fit(phase=args.phase, verbose=True)
-    trainer.save("models/goldtrader_r1_best.pt")
-    print("\n✅ GoldTrader-R1 训练完成!")
+                                loss_fn=w_loss, policy_loss_fn=p_loss, da_loss_fn=da_loss,
+                                ddp=ddp, sampler=tr_sampler if ddp else None)
+    trainer.fit(phase=args.phase, verbose=is_master)
+    if is_master:
+        trainer.save("models/goldtrader_r1_best.pt")
+        print("\n✅ GoldTrader-R1 训练完成!")
+    if ddp:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

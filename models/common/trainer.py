@@ -11,6 +11,7 @@ import math, time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.cuda.amp import GradScaler
 
 
@@ -39,7 +40,7 @@ class WorldModelLoss(nn.Module):
         ) / H
 
         # 收益率损失 (Gaussian NLL)
-        rlv = pred["ret_logvar"].clamp(-10, 10)
+        rlv = pred["ret_logvar"].clamp(-3, 5)
         L_ret = 0.5 * (rlv + (target["Y_ret"] - pred["ret_mean"]) ** 2 / (rlv.exp() + 1e-8)).mean()
 
         # 波动率损失 (NaN-safe)
@@ -76,12 +77,15 @@ class BaseTrainer:
     """
 
     def __init__(self, model, cfg, train_ldr, val_ldr, test_ldr,
-                 loss_fn=None, lr: float = None, epochs: int = None):
+                 loss_fn=None, lr: float = None, epochs: int = None,
+                 ddp: bool = False, sampler=None):
         self.model = model
         self.cfg = cfg
         self.train_ldr = train_ldr
         self.val_ldr = val_ldr
         self.test_ldr = test_ldr
+        self.ddp = ddp
+        self.sampler = sampler  # DistributedSampler (only used when ddp=True)
 
         self.loss_fn = loss_fn or WorldModelLoss(
             cfg.lambda_dir, cfg.lambda_ret, cfg.lambda_vol, cfg.lambda_regime
@@ -89,7 +93,7 @@ class BaseTrainer:
         self.lr = lr or cfg.lr
         self.epochs = epochs or cfg.epochs
 
-        self.opt = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=cfg.weight_decay)
+        self.opt = torch.optim.AdamW(self._unwrap_model().parameters(), lr=self.lr, weight_decay=cfg.weight_decay)
         self.scaler = GradScaler(enabled=(cfg.dtype == "float16"))
 
         total_steps = len(train_ldr) * self.epochs // cfg.grad_accum
@@ -102,17 +106,29 @@ class BaseTrainer:
         self.best_val = float("inf")
         self.best_state = None
 
+    def _unwrap_model(self):
+        """Returns the raw model (unwrapped from DDP if needed)."""
+        return self.model.module if self.ddp else self.model
+
+    def _is_master(self):
+        return (not self.ddp) or (dist.get_rank() == 0)
+
     def _amp_ctx(self):
         dt = torch.bfloat16 if self.cfg.dtype == "bfloat16" else torch.float32
-        return torch.amp.autocast("cuda", dtype=dt)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        return torch.amp.autocast(device, dtype=dt)
 
     def _prepare_target(self, yd, yr, yv, yg):
         return {"Y_dir": yd, "Y_ret": yr, "Y_vol": yv, "Y_regime": yg}
 
-    def train_epoch(self):
+    def train_epoch(self, epoch: int = 0, log_interval: int = 200):
         self.model.train()
+        if self.sampler is not None:
+            self.sampler.set_epoch(epoch)
         tl, comps = 0.0, {}
         self.opt.zero_grad()
+        n_batches = len(self.train_ldr)
+        t_start = time.time()
         for i, batch in enumerate(self.train_ldr):
             x, yd, yr, yv, yg = [b.to(self.cfg.device) for b in batch]
             with self._amp_ctx():
@@ -127,6 +143,13 @@ class BaseTrainer:
                 self.opt.zero_grad(); self.scheduler.step()
             tl += loss.item() * self.cfg.grad_accum
             for k in c: comps[k] = comps.get(k, 0) + c[k]
+            # 进度日志 (首个 batch 和每 N 个 batch 打印，仅 master)
+            if self._is_master() and (i == 0 or (i + 1) % log_interval == 0):
+                elapsed = time.time() - t_start
+                speed = (i + 1) / elapsed if elapsed > 0 else 0
+                eta = (n_batches - i - 1) / speed if speed > 0 else 0
+                print(f"    batch {i+1:>5d}/{n_batches} ({100*(i+1)/n_batches:.0f}%) | "
+                      f"loss={tl/(i+1):.4f} | {speed:.0f} bat/s | ETA {eta:.0f}s", flush=True)
         n = len(self.train_ldr)
         return tl / n, {k: v / n for k, v in comps.items()}
 
@@ -145,37 +168,64 @@ class BaseTrainer:
             cor += (pred_dir == yd[:, 0]).sum().item(); tot += yd.size(0)
         avg_loss = tl / len(ldr)
         acc = cor / max(tot, 1)
-        print(f"  📊 {tag}: loss={avg_loss:.6f}  acc(short)={acc:.2%}")
+        if self._is_master():
+            print(f"  📊 {tag}: loss={avg_loss:.6f}  acc(short)={acc:.2%}")
         return avg_loss, acc
 
-    def fit(self, verbose=True):
+    def fit(self, verbose=True, patience: int = 30, min_delta: float = 1e-5):
+        """
+        patience:  连续 N 个 epoch val_loss 不创新低则早停
+        min_delta: val_loss 改善低于此值视为无改善
+        """
         if verbose:
-            n_params = sum(p.numel() for p in self.model.parameters())
+            n_params = sum(p.numel() for p in self._unwrap_model().parameters())
             print(f"\n{'='*60}\n🚀 训练启动 ({self.cfg.model_type})")
             print(f"  参数: {n_params:,} | 设备: {self.cfg.device} | 精度: {self.cfg.dtype}")
             print(f"  batch={self.cfg.batch_size} | seq_len={self.cfg.seq_len} | features={self.cfg.n_features}")
             print(f"  use_future_vol={self.cfg.use_future_vol}")
+            print(f"  max_epochs={self.epochs} | patience={patience} | min_delta={min_delta}")
+            if self.ddp:
+                print(f"  🔗 DDP: {dist.get_world_size()} GPUs")
             print(f"{'='*60}")
 
+        no_improve = 0
+        final_epoch = self.epochs
         for ep in range(1, self.epochs + 1):
             t0 = time.time()
-            tl, comps = self.train_epoch()
+            tl, comps = self.train_epoch(epoch=ep)
             vl, va = self.evaluate(self.val_ldr, "val")
-            comps_str = " ".join(f"{k}={v:.4f}" for k, v in comps.items())
-            print(f"  Ep {ep:3d} | train={tl:.6f} val={vl:.6f} acc={va:.2%} "
-                  f"lr={self.scheduler.get_last_lr()[0]:.2e} | {comps_str} | {time.time()-t0:.1f}s")
-            if vl < self.best_val:
-                self.best_val = vl
-                self.best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
-                if verbose: print(f"  ✅ best (vl={vl:.6f})")
+            if self._is_master():
+                comps_str = " ".join(f"{k}={v:.4f}" for k, v in comps.items())
+                print(f"  Ep {ep:3d} | train={tl:.6f} val={vl:.6f} acc={va:.2%} "
+                      f"lr={self.scheduler.get_last_lr()[0]:.2e} | {comps_str} | {time.time()-t0:.1f}s")
 
-        self.model.load_state_dict(self.best_state)
-        print(f"\n🏁 最佳 val_loss={self.best_val:.6f}")
-        self.evaluate(self.test_ldr, "test")
+            improved = vl < self.best_val - min_delta
+            if improved:
+                self.best_val = vl
+                self.best_state = {k: v.cpu().clone() for k, v in self._unwrap_model().state_dict().items()}
+                no_improve = 0
+                if self._is_master():
+                    print(f"  ✅ best (vl={vl:.6f})")
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    if self._is_master():
+                        print(f"  ⏹ 早停! {patience} 轮无改善 (best_vl={self.best_val:.6f})")
+                    final_epoch = ep
+                    break
+
+        self._unwrap_model().load_state_dict(self.best_state)
+        if self._is_master():
+            print(f"\n🏁 训练完成 | epoch={final_epoch}/{self.epochs} | best_val_loss={self.best_val:.6f}")
+            self.evaluate(self.test_ldr, "test")
+        if self.ddp:
+            dist.barrier()
         return self.best_val
 
     def save(self, path):
-        torch.save({"state": self.best_state, "cfg": self.cfg, "val_loss": self.best_val}, path)
+        state = self.best_state if self.best_state is not None else \
+                {k: v.cpu().clone() for k, v in self._unwrap_model().state_dict().items()}
+        torch.save({"state": state, "cfg": self.cfg, "val_loss": self.best_val}, path)
         print(f"  💾 模型已保存: {path}")
 
 
@@ -195,8 +245,10 @@ class MultiPhaseTrainer(BaseTrainer):
     """
 
     def __init__(self, model, cfg, train_ldr, val_ldr, test_ldr,
-                 loss_fn=None, policy_loss_fn=None, da_loss_fn=None):
-        super().__init__(model, cfg, train_ldr, val_ldr, test_ldr, loss_fn)
+                 loss_fn=None, policy_loss_fn=None, da_loss_fn=None,
+                 ddp: bool = False, sampler=None):
+        super().__init__(model, cfg, train_ldr, val_ldr, test_ldr, loss_fn,
+                         ddp=ddp, sampler=sampler)
 
         self.policy_loss_fn = policy_loss_fn
         self.da_loss_fn = da_loss_fn
@@ -230,14 +282,15 @@ class MultiPhaseTrainer(BaseTrainer):
 
     def _rebuild_optimizer(self, lr):
         self.opt = torch.optim.AdamW(
-            filter(lambda p: p.requires_grad, self.model.parameters()),
+            filter(lambda p: p.requires_grad, self._unwrap_model().parameters()),
             lr=lr, weight_decay=self.cfg.weight_decay,
         )
         self.scaler = GradScaler(enabled=(self.cfg.dtype == "float16"))
 
     def fit_phase1(self):
         """世界模型训练."""
-        print(f"\n{'='*60}\n🧬 Phase 1: 世界模型训练 (预测 + 环境识别)\n{'='*60}")
+        if self._is_master():
+            print(f"\n{'='*60}\n🧬 Phase 1: 世界模型训练 (预测 + 环境识别)\n{'='*60}")
         self._set_trainable(encoder=True, pred=True, policy=False)
         self._rebuild_optimizer(self.cfg.lr_p1)
         self.best_val = float("inf")
@@ -245,21 +298,26 @@ class MultiPhaseTrainer(BaseTrainer):
 
         for ep in range(1, epochs + 1):
             t0 = time.time()
-            tl, comps = self.train_epoch()
+            tl, comps = self.train_epoch(epoch=ep)
             vl, va = self.evaluate(self.val_ldr, "val")
-            print(f"  Ep {ep:3d} | train={tl:.6f} val={vl:.6f} acc={va:.2%} "
-                  f"L_dir={comps.get('L_dir',0):.4f} L_ret={comps.get('L_ret',0):.4f} "
-                  f"L_vol={comps.get('L_vol',0):.6f} L_regime={comps.get('L_regime',0):.4f} "
-                  f"| {time.time()-t0:.1f}s")
+            if self._is_master():
+                print(f"  Ep {ep:3d} | train={tl:.6f} val={vl:.6f} acc={va:.2%} "
+                      f"L_dir={comps.get('L_dir',0):.4f} L_ret={comps.get('L_ret',0):.4f} "
+                      f"L_vol={comps.get('L_vol',0):.6f} L_regime={comps.get('L_regime',0):.4f} "
+                      f"| {time.time()-t0:.1f}s")
             if vl < self.best_val:
                 self.best_val = vl
-                self.best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
-        self.model.load_state_dict(self.best_state)
-        print(f"  🏁 Phase 1 最佳 val_loss={self.best_val:.6f}")
+                self.best_state = {k: v.cpu().clone() for k, v in self._unwrap_model().state_dict().items()}
+        self._unwrap_model().load_state_dict(self.best_state)
+        if self._is_master():
+            print(f"  🏁 Phase 1 最佳 val_loss={self.best_val:.6f}")
+        if self.ddp:
+            dist.barrier()
 
     def fit_phase2(self):
         """模仿学习 — 策略网络."""
-        print(f"\n{'='*60}\n🎯 Phase 2: 模仿学习 (策略网络)\n{'='*60}")
+        if self._is_master():
+            print(f"\n{'='*60}\n🎯 Phase 2: 模仿学习 (策略网络)\n{'='*60}")
         self._set_trainable(encoder=False, pred=False, policy=True)
         self._rebuild_optimizer(self.cfg.lr_p2)
         self.best_val = float("inf")
@@ -268,7 +326,10 @@ class MultiPhaseTrainer(BaseTrainer):
         for ep in range(1, epochs + 1):
             t0 = time.time()
             self.model.train()
+            if self.sampler is not None:
+                self.sampler.set_epoch(ep)
             tl = 0.0
+            n_batches = len(self.train_ldr)
             self.opt.zero_grad()
             for i, batch in enumerate(self.train_ldr):
                 x, yd, yr, yv, yg = [b.to(self.cfg.device) for b in batch]
@@ -290,22 +351,33 @@ class MultiPhaseTrainer(BaseTrainer):
                 self.scaler.scale(loss).backward()
                 if (i + 1) % self.cfg.grad_accum == 0:
                     self.scaler.unscale_(self.opt)
-                    nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    nn.utils.clip_grad_norm_(self._unwrap_model().parameters(), 1.0)
                     self.scaler.step(self.opt); self.scaler.update()
                     self.opt.zero_grad()
                 tl += loss.item() * self.cfg.grad_accum
+                if self._is_master() and (i == 0 or (i + 1) % 200 == 0):
+                    elapsed = time.time() - t0
+                    speed = (i + 1) / elapsed if elapsed > 0 else 0
+                    eta = (n_batches - i - 1) / speed if speed > 0 else 0
+                    print(f"    batch {i+1:>5d}/{n_batches} ({100*(i+1)/n_batches:.0f}%) | "
+                          f"loss={tl/(i+1):.4f} | {speed:.0f} bat/s | ETA {eta:.0f}s", flush=True)
             tl /= len(self.train_ldr)
             vl, _ = self.evaluate(self.val_ldr, "val")
-            print(f"  Ep {ep:3d} | train={tl:.6f} val={vl:.6f} | {time.time()-t0:.1f}s")
+            if self._is_master():
+                print(f"  Ep {ep:3d} | train={tl:.6f} val={vl:.6f} | {time.time()-t0:.1f}s")
             if vl < self.best_val:
                 self.best_val = vl
-                self.best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
-        self.model.load_state_dict(self.best_state)
-        print(f"  🏁 Phase 2 最佳 val_loss={self.best_val:.6f}")
+                self.best_state = {k: v.cpu().clone() for k, v in self._unwrap_model().state_dict().items()}
+        self._unwrap_model().load_state_dict(self.best_state)
+        if self._is_master():
+            print(f"  🏁 Phase 2 最佳 val_loss={self.best_val:.6f}")
+        if self.ddp:
+            dist.barrier()
 
     def fit_phase3(self):
         """决策感知联合微调."""
-        print(f"\n{'='*60}\n🔗 Phase 3: 决策感知联合微调\n{'='*60}")
+        if self._is_master():
+            print(f"\n{'='*60}\n🔗 Phase 3: 决策感知联合微调\n{'='*60}")
         self._set_trainable(encoder=True, pred=True, policy=True)
         self._rebuild_optimizer(self.cfg.lr_p3)
         self.best_val = float("inf")
@@ -314,7 +386,10 @@ class MultiPhaseTrainer(BaseTrainer):
         for ep in range(1, epochs + 1):
             t0 = time.time()
             self.model.train()
+            if self.sampler is not None:
+                self.sampler.set_epoch(ep)
             tl = 0.0
+            n_batches = len(self.train_ldr)
             self.opt.zero_grad()
             for i, batch in enumerate(self.train_ldr):
                 x, yd, yr, yv, yg = [b.to(self.cfg.device) for b in batch]
@@ -329,24 +404,36 @@ class MultiPhaseTrainer(BaseTrainer):
                 self.scaler.scale(loss).backward()
                 if (i + 1) % self.cfg.grad_accum == 0:
                     self.scaler.unscale_(self.opt)
-                    nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    nn.utils.clip_grad_norm_(self._unwrap_model().parameters(), 1.0)
                     self.scaler.step(self.opt); self.scaler.update()
                     self.opt.zero_grad()
                 tl += loss.item() * self.cfg.grad_accum
+                if self._is_master() and (i == 0 or (i + 1) % 200 == 0):
+                    elapsed = time.time() - t0
+                    speed = (i + 1) / elapsed if elapsed > 0 else 0
+                    eta = (n_batches - i - 1) / speed if speed > 0 else 0
+                    print(f"    batch {i+1:>5d}/{n_batches} ({100*(i+1)/n_batches:.0f}%) | "
+                          f"loss={tl/(i+1):.4f} | {speed:.0f} bat/s | ETA {eta:.0f}s", flush=True)
             tl /= len(self.train_ldr)
             vl, _ = self.evaluate(self.val_ldr, "val")
-            print(f"  Ep {ep:3d} | train={tl:.6f} val={vl:.6f} | {time.time()-t0:.1f}s")
+            if self._is_master():
+                print(f"  Ep {ep:3d} | train={tl:.6f} val={vl:.6f} | {time.time()-t0:.1f}s")
             if vl < self.best_val:
                 self.best_val = vl
-                self.best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
-        self.model.load_state_dict(self.best_state)
-        print(f"  🏁 Phase 3 最佳 val_loss={self.best_val:.6f}")
+                self.best_state = {k: v.cpu().clone() for k, v in self._unwrap_model().state_dict().items()}
+        self._unwrap_model().load_state_dict(self.best_state)
+        if self._is_master():
+            print(f"  🏁 Phase 3 最佳 val_loss={self.best_val:.6f}")
+        if self.ddp:
+            dist.barrier()
 
     def fit(self, phase="all", verbose=True):
         if verbose:
-            n_params = sum(p.numel() for p in self.model.parameters())
+            n_params = sum(p.numel() for p in self._unwrap_model().parameters())
             print(f"\n{'='*60}\n🚀 GoldTrader-R1 多阶段训练")
             print(f"  参数: {n_params:,} ({n_params/1e6:.1f}M) | 设备: {self.cfg.device}")
+            if self.ddp:
+                print(f"  🔗 DDP: {dist.get_world_size()} GPUs")
             print(f"  phase={phase}")
             print(f"{'='*60}")
 
@@ -357,6 +444,9 @@ class MultiPhaseTrainer(BaseTrainer):
         if phase in ("p3", "phase3", "all"):
             self.fit_phase3()
 
-        print(f"\n✅ 训练完成! 最终最佳 val_loss={self.best_val:.6f}")
-        self.evaluate(self.test_ldr, "test")
+        if self._is_master():
+            print(f"\n✅ 训练完成! 最终最佳 val_loss={self.best_val:.6f}")
+            self.evaluate(self.test_ldr, "test")
+        if self.ddp:
+            dist.barrier()
         return self.best_val

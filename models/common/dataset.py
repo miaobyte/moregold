@@ -22,6 +22,7 @@ class GoldDataset(Dataset):
         self.engine = engine
         self.feats = engine.features
         self.seq_len = seq_len or engine.cfg.seq_len
+        self.start_offset = engine.start_offset
         self.Y_dir = engine.Y_dir
         self.Y_ret = engine.Y_ret
         self.Y_vol = engine.Y_vol
@@ -39,8 +40,10 @@ class GoldDataset(Dataset):
         return self.sl.stop - self.sl.start
 
     def __getitem__(self, i):
+        # 样本索引 → 原始特征时间索引 (关键偏移修正)
         idx = self.sl.start + i
-        x  = torch.from_numpy(self.feats[:, idx - self.seq_len:idx]).float()
+        raw_idx = idx + self.start_offset
+        x  = torch.from_numpy(self.feats[:, raw_idx - self.seq_len:raw_idx]).float().contiguous()
         yd = torch.from_numpy(self.Y_dir[idx]).float()
         yr = torch.from_numpy(self.Y_ret[idx]).float()
         yv = torch.from_numpy(self.Y_vol[idx]).float()

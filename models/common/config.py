@@ -51,7 +51,7 @@ class BaseConfig:
     # ---- 损失权重 ----
     lambda_dir: float  = 1.0
     lambda_ret: float  = 0.5
-    lambda_vol: float  = 0.1
+    lambda_vol: float  = 0.3
     lambda_regime: float = 0.3
 
     # ---- 系统 ----

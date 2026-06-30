@@ -72,6 +72,8 @@ class DataEngine:
         self.train_idx = slice(0, int(N * 0.70))
         self.val_idx   = slice(int(N * 0.70), int(N * 0.85))
         self.test_idx  = slice(int(N * 0.85), N)
+        # 样本索引 → 原始时间索引的偏移量
+        self.start_offset = self.cfg.seq_len + 288
         print(f"  📊 样本: train={self.train_idx.stop - self.train_idx.start:,}  "
               f"val={self.val_idx.stop - self.val_idx.start:,}  "
               f"test={self.test_idx.stop - self.test_idx.start:,}")
@@ -90,7 +92,8 @@ class DataEngine:
         cur = conn.cursor()
         cur.execute("""
             SELECT trade_date, trade_time, price_usd, weekday, hour, minute
-            FROM gold_prices WHERE price_usd > 0 ORDER BY dt
+            FROM gold_prices WHERE price_usd > 0 AND minute % 5 = 0
+            ORDER BY dt
         """)
         rows = cur.fetchall()
         cur.close(); conn.close()

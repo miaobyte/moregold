@@ -122,9 +122,9 @@ def main():
     va_ds = GoldDataset(engine, "val", seq_len=cfg.seq_len)
     te_ds = GoldDataset(engine, "test", seq_len=cfg.seq_len)
 
-    tr_ldr = DataLoader(tr_ds, cfg.batch_size, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
-    va_ldr = DataLoader(va_ds, cfg.batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    te_ldr = DataLoader(te_ds, cfg.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    tr_ldr = DataLoader(tr_ds, cfg.batch_size, shuffle=True, num_workers=0, pin_memory=False, drop_last=True)
+    va_ldr = DataLoader(va_ds, cfg.batch_size, shuffle=False, num_workers=0, pin_memory=False)
+    te_ldr = DataLoader(te_ds, cfg.batch_size, shuffle=False, num_workers=0, pin_memory=False)
 
     # ---- 模型 ----
     model = GoldFormer(cfg).to(cfg.device)
