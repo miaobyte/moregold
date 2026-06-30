@@ -55,7 +55,7 @@ body{background:#131722;color:#d1d4dc;font-family:-apple-system,system-ui,sans-s
 </div>
 <div class="controls">
   <label>⏱ 对比</label>
-  <input type="datetime-local" id="cmpTime" step="60">
+  <input type="date" id="cmpDate"><input type="time" id="cmpTime" step="60">
   <label>±</label><input type="number" id="cmpWin" value="24" min="1" max="168">h
   <button class="btn btn-add" onclick="addOverlay()">+ 添加</button>
   <button class="btn btn-now" onclick="setNow()">📍 现在</button>
@@ -86,8 +86,15 @@ let mainSeries, yMode='usd';
 const overlays=[];
 
 function setNow(){
-  const d=new Date();d.setMinutes(d.getMinutes()-d.getTimezoneOffset());
-  document.getElementById('cmpTime').value=d.toISOString().slice(0,16);
+  const d=new Date();
+  document.getElementById('cmpDate').value=d.toISOString().slice(0,10);
+  document.getElementById('cmpTime').value=d.toISOString().slice(11,16);
+}
+function getDatetime(){
+  const d=document.getElementById('cmpDate').value;
+  const t=document.getElementById('cmpTime').value;
+  if(!d)return null;
+  return t?d+' '+t+':00':d+' 00:00:00';
 }
 
 function makeSeries(color, dashed){
@@ -152,13 +159,12 @@ function switchY(){
 
 // ====== 对比线 ======
 async function addOverlay(){
-  const t=document.getElementById('cmpTime').value;
+  const dt=getDatetime();
+  if(!dt)return;
   const w=parseInt(document.getElementById('cmpWin').value)||24;
-  if(!t)return;
-  const dt=t.replace('T',' ')+':00';
   const color=C[overlays.length % C.length];
   const label=dt.slice(0,16);
-  overlays.push({dt,window:w,color,label,series:null});
+  overlays.push({dt,window:w,color,label,series:null,offset:0,data:null});
   renderTags();
   await loadOverlay(overlays[overlays.length-1]);
 }
@@ -169,14 +175,25 @@ async function loadOverlay(o){
   if(!rows.length)return;
 
   const refTs=new Date(o.dt).getTime()/1000;
-  const now=Date.now()/1000;
-  const shift=now-refTs;
-  const data=rows.map(r=>({time:Math.floor(new Date(r.dt).getTime()/1000)+shift,value:r[mode]}));
+  const nowTime=Date.now()/1000;
+  const shift=nowTime-refTs;
+  o.data=rows.map(r=>({time:Math.floor(new Date(r.dt).getTime()/1000)+shift,value:r[mode]}));
 
   const series=makeSeries(o.color,true);
-  series.setData(data);
+  series.setData(applyOffset(o));
   if(o.series)chart.removeSeries(o.series);
   o.series=series;
+}
+
+function applyOffset(o){
+  if(!o.data||!o.offset)return o.data;
+  return o.data.map(p=>({...p,value:p.value+o.offset}));
+}
+
+function updateOverlayData(o){
+  if(!o.series||!o.data)return;
+  o.series.setData(applyOffset(o));
+  renderTags();
 }
 
 function removeOverlay(i){
@@ -188,9 +205,50 @@ function removeOverlay(i){
 
 function renderTags(){
   document.getElementById('overlayTags').innerHTML=overlays.map((o,i)=>
-    \`<div class="ov-tag" style="border-color:\${o.color}"><span class="dot" style="background:\${o.color}"></span>\${o.label} ±\${o.window}h <button class="btn btn-rm" onclick="removeOverlay(\${i})">×</button></div>\`
+    \`<div class="ov-tag" style="border-color:\${o.color}"><span class="dot" style="background:\${o.color}"></span>\${o.label} ±\${o.window}h <span style="color:#f0c040">\${o.offset?' '+(o.offset>0?'+':'')+o.offset.toFixed(1):''}</span> <button class="btn btn-rm" onclick="removeOverlay(\${i})">×</button></div>\`
   ).join('');
 }
+
+// ====== 拖拽线条上下平移 ======
+let dragTarget=null, dragStartY=0, dragStartPrice=0;
+
+chart.subscribeClick(()=>{dragTarget=null;});  // 点击取消拖拽
+
+document.getElementById('chart').addEventListener('mousedown',e=>{
+  if(e.button!==0||!mainSeries)return;
+  const rect=e.target.getBoundingClientRect();
+  const x=e.clientX-rect.left, y=e.clientY-rect.top;
+  const price=mainSeries.coordinateToPrice(y);
+  if(price==null)return;
+  let best=null,bestDist=Infinity;
+  for(let i=0;i<overlays.length;i++){
+    if(!overlays[i].series||!overlays[i].data)continue;
+    const ts=chart.timeScale().coordinateToTime(x);
+    if(ts==null)continue;
+    const d=overlays[i].data.find(p=>p.time>=ts);
+    if(!d)continue;
+    const linePrice=(d.value+(overlays[i].offset||0));
+    const dist=Math.abs(price-linePrice);
+    if(dist<bestDist){bestDist=dist;best=overlays[i];}
+  }
+  if(best&&bestDist<20){
+    dragTarget=best;dragStartY=e.clientY;dragStartPrice=price;
+    e.preventDefault();
+  }
+});
+
+window.addEventListener('mousemove',e=>{
+  if(!dragTarget||!mainSeries)return;
+  const price=mainSeries.coordinateToPrice(
+    e.clientY-document.getElementById('chart').getBoundingClientRect().top);
+  if(price==null)return;
+  const delta=price-dragStartPrice;
+  dragTarget.offset=(dragTarget.offset||0)+delta;
+  dragStartPrice=price;
+  updateOverlayData(dragTarget);
+});
+
+window.addEventListener('mouseup',()=>{dragTarget=null;});
 
 function setRange(){
   const rangeH=parseInt(document.getElementById('rangeH').value);
