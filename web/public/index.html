@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>GoldView — 金价可视化</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.2/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#131722;color:#d1d4dc;font-family:-apple-system,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+.topbar{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:#1e222d;border-bottom:1px solid #2a2e39;min-height:38px}
+.topbar h1{font-size:15px;color:#f0c040;white-space:nowrap}
+.prices{display:flex;gap:14px;font-size:13px}
+.prices .usd{color:#4fc3f7}.prices .cny{color:#81c784}
+.prices .val{font-weight:700;font-size:15px}
+.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 12px;background:#1e222d;border-bottom:1px solid #2a2e39;font-size:12px}
+.controls input,.controls select{background:#2a2e39;color:#d1d4dc;border:1px solid #3a3e4a;padding:3px 6px;border-radius:3px;font-size:12px}
+.controls input[type="date"]{width:130px;color-scheme:dark}
+.controls input[type="time"]{width:110px;color-scheme:dark}
+.controls input[type="number"]{width:48px}
+.controls label{color:#787b86}
+.btn{padding:3px 10px;border:none;border-radius:3px;cursor:pointer;font-size:12px;color:#fff}
+.btn-add{background:#1976d2}.btn-add:hover{background:#1565c0}
+.btn-rm{background:#c62828;padding:2px 7px;font-size:10px}.btn-rm:hover{background:#b71c1c}
+.btn-now{background:#2e7d32}.btn-now:hover{background:#1b5e20}
+.overlays{display:flex;gap:6px;flex-wrap:wrap;padding:3px 12px;background:#1e222d;font-size:11px}
+.ov-tag{display:flex;align-items:center;gap:5px;background:#2a2e39;padding:2px 7px;border-radius:3px;border-left:3px solid #999}
+.ov-tag .dot{width:7px;height:7px;border-radius:50%}
+#chart{flex:1;cursor:crosshair}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>🥇 GoldView</h1>
+  <div class="prices" id="prices">
+    <span>💰 <span class="usd val" id="pUsd">—</span> USD</span>
+    <span>💴 <span class="cny val" id="pCny">—</span> CNY</span>
+  </div>
+</div>
+<div class="controls">
+  <label>⏱ 对比</label>
+  <input type="date" id="cmpDate"><input type="time" id="cmpTime" step="60">
+  <label>±</label><input type="number" id="cmpWin" value="24" min="1" max="168">h
+  <button class="btn btn-add" onclick="addOverlay()">+ 添加</button>
+  <button class="btn btn-now" onclick="setNow()">📍 现在</button>
+  <label style="margin-left:8px">Y轴</label>
+  <select id="yMode" onchange="switchY()">
+    <option value="usd">USD/oz</option><option value="cny">CNY/g</option>
+  </select>
+  <label>范围</label>
+  <select id="rangeH" onchange="setRange()">
+    <option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option><option value="48">2d</option><option value="72">3d</option>
+  </select>
+</div>
+<div class="overlays" id="overlayTags"></div>
+<div id="chart"></div>
+<script src="/app.js"></script>
+</body>
+</html>
