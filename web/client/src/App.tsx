@@ -19,7 +19,6 @@ export default function App() {
   const [gran, setGran] = useState<Granularity>(1);
   const [manualGran, setManualGran] = useState<Granularity | 0>(0);
   const [tooltipLines, setTooltipLines] = useState<any[]>([]);
-  const dragRef = useRef<any>(null);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
@@ -30,7 +29,7 @@ export default function App() {
       rightPriceScale: { borderColor: '#4fc3f7', scaleMargins: { top: 0.05, bottom: 0.05 } },
       leftPriceScale: { borderColor: '#81c784', visible: true, scaleMargins: { top: 0.05, bottom: 0.05 } },
       timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false },
-      handleScroll: { vertTouchDrag: true, horzTouchDrag: true, mouseWheel: true },
+      handleScroll: { mouseWheel: true },
       handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
     chartRef.current = c;
@@ -45,7 +44,7 @@ export default function App() {
     });
 
     c.subscribeCrosshairMove((param) => {
-      if (!param.time || !param.seriesData || dragRef.current) { setTooltipLines([]); return; }
+      if (!param.time || !param.seriesData) { setTooltipLines([]); return; }
       const lines: any[] = [];
       const fmt = (ts: number) => {
         const d = new Date(ts * 1000);

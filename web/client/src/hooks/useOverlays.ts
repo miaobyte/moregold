@@ -1,6 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
 import { type IChartApi, type ISeriesApi, ColorType } from 'lightweight-charts';
-import type { Overlay, PricePoint, PriceMode, DragState } from '../types';
 import { COLORS } from '../utils/constants';
 import { fetchAround } from '../utils/api';
 
@@ -30,7 +29,6 @@ function dayOffset(dt: string) {
 
 export function useOverlays(chart: IChartApi | null, mode: PriceMode, onUpdate: () => void) {
   const [overlays, setOverlays] = useState<Overlay[]>([]);
-  const dragRef = useRef<DragState | null>(null);
 
   const add = useCallback(async (dt: string, window: number) => {
     const color = COLORS[overlays.length % COLORS.length];
@@ -77,5 +75,5 @@ export function useOverlays(chart: IChartApi | null, mode: PriceMode, onUpdate: 
     setOverlays(prev => [...prev]);
   }, [chart, mode, onUpdate]);
 
-  return { overlays, setOverlays, add, remove, reload, dragRef, applyOffset, formatDate, dayOffset };
+  return { overlays, setOverlays, add, remove, reload, applyOffset, formatDate, dayOffset };
 }
