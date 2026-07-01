@@ -1,4 +1,4 @@
-// GoldView Frontend — lightweight-charts + SSE + 双轴拖动
+// GoldView Frontend — lightweight-charts + SSE + 可拖动对比线
 
 const { createChart, ColorType } = LightweightCharts;
 const COLORS = ['#4fc3f7','#ff7043','#81c784','#ba68c8','#ffd54f','#4dd0e1','#f06292','#aed581','#ff8a65','#90a4ae'];
@@ -11,17 +11,17 @@ window._col = 'usd';
 chart = createChart(document.getElementById('chart'), {
   layout: { background: { type: ColorType.Solid, color: '#131722' }, textColor: '#787b86' },
   grid: { vertLines: { color: '#1e222d' }, horzLines: { color: '#1e222d' } },
-  crosshair: { mode: 1 },
+  crosshair: { mode: 0 },
   rightPriceScale: { borderColor: '#2a2e39' },
   timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false },
-  handleScroll: { vertTouchDrag: false, horzTouchDrag: false, mouseWheel: true },
-  handleScale: { axisPressedMouseMove: { price: false, time: false }, mouseWheel: true, pinch: true },
+  handleScroll: { vertTouchDrag: true, horzTouchDrag: true, mouseWheel: true },
+  handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
 });
 
 function makeSeries(color, dashed) {
   return chart.addLineSeries({
-    color, lineWidth: dashed ? 1.5 : 2,
-    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: true,
+    color, lineWidth: dashed ? 2 : 2.5,
+    priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
     ...(dashed ? { lineStyle: 2 } : {}),
   });
 }
@@ -116,13 +116,23 @@ async function loadOverlay(o) {
   const mode = document.getElementById('yMode').value;
   const rows = await api('/around?dt=' + encodeURIComponent(o.dt) + '&hours=' + o.window);
   if (!rows.length) return;
-  o.data = rows.map(r => ({
-    time: Math.floor(new Date(r.dt).getTime() / 1000),
-    value: r[mode],
-  }));
+  // 时间对齐: 按「同日同时刻」映射到当前日期
+  const ovDate = new Date(o.dt);
+  ovDate.setHours(0, 0, 0, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dayOffset = Math.round((today - ovDate) / 86400000);
+
+  o.data = rows.map(r => {
+    const d = new Date(r.dt);
+    d.setDate(d.getDate() + dayOffset);
+    return { time: Math.floor(d.getTime() / 1000), value: r[mode] };
+  });
+
   if (o.series) chart.removeSeries(o.series);
   o.series = makeSeries(o.color, true);
   o.series.setData(applyOffset(o));
+  addMarkers(o);
 }
 
 function applyOffset(o) {
@@ -132,10 +142,54 @@ function applyOffset(o) {
   return o.data.map(p => ({ time: p.time + ts, value: p.value + po }));
 }
 
+// 在线条上添加可拖动的圆点标记
+function addMarkers(o) {
+  if (!o.series || !o.data || !o.data.length) return;
+  const mid = o.data[Math.floor(o.data.length / 2)];
+  const ts = o.timeShift || 0;
+  o.series.setMarkers([{
+    time: mid.time + ts,
+    position: 'inBar',
+    color: o.color,
+    shape: 'circle',
+    size: 2,
+  }]);
+}
+
 async function refetchOverlay(o, newDt) {
   o.dt = newDt;
   o.label = newDt.slice(0, 16);
   await loadOverlay(o);
+}
+
+// ====== 按钮控制: 精确调节 ======
+function shiftOverlayTime(i, hours) {
+  const o = overlays[i];
+  if (!o) return;
+  o.timeShift = (o.timeShift || 0) + hours * 3600;
+  updateOverlayData(o);
+
+  // 偏移超过阈值时重新获取数据并重置 shift
+  if (Math.abs(o.timeShift) >= 7200) {
+    const totalH = o.timeShift / 3600;
+    const newDt = shiftDatetime(o.dt, Math.round(totalH));
+    o.timeShift = 0;
+    refetchOverlay(o, newDt);
+  }
+}
+
+function shiftOverlayPrice(i, delta) {
+  const o = overlays[i];
+  if (!o) return;
+  o.offset = (o.offset || 0) + delta;
+  updateOverlayData(o);
+}
+
+function updateOverlayData(o) {
+  if (!o.series || !o.data) return;
+  o.series.setData(applyOffset(o));
+  addMarkers(o);
+  renderTags();
 }
 
 function removeOverlay(i) {
@@ -146,106 +200,117 @@ function removeOverlay(i) {
 
 function renderTags() {
   document.getElementById('overlayTags').innerHTML = overlays.map((o, i) => {
-    const parts = [];
-    if (o.timeShift) parts.push(`Δt${(o.timeShift >= 0 ? '+' : '')}${(o.timeShift / 3600).toFixed(1)}h`);
-    if (o.offset) parts.push(`${(o.offset >= 0 ? '+' : '')}${o.offset.toFixed(1)}`);
-    const info = parts.length ? parts.join(' ') : '';
+    const info = [];
+    if (o.timeShift) info.push(`Δt${(o.timeShift >= 0 ? '+' : '')}${(o.timeShift / 3600).toFixed(1)}h`);
+    if (o.offset) info.push(`${(o.offset >= 0 ? '+' : '')}${o.offset.toFixed(1)}`);
+    const txt = info.length ? ' <span style="color:#f0c040">' + info.join(' ') + '</span>' : '';
     return `<div class="ov-tag" style="border-color:${o.color}">
-      <span class="dot" style="background:${o.color}"></span>
-      ${o.label} ±${o.window}h
-      <span style="color:#f0c040">${info}</span>
+      <span class="dot" style="background:${o.color};cursor:grab" title="拖动线条或按钮调节"></span>
+      ${o.label} ±${o.window}h${txt}
+      <button class="btn" style="background:#1a237e;padding:2px 5px;font-size:10px" onclick="shiftOverlayTime(${i},-1)" title="左移1小时">◀</button>
+      <button class="btn" style="background:#1a237e;padding:2px 5px;font-size:10px" onclick="shiftOverlayTime(${i},1)" title="右移1小时">▶</button>
+      <button class="btn" style="background:#1b5e20;padding:2px 5px;font-size:10px" onclick="shiftOverlayPrice(${i},5)" title="上移5美元">▲</button>
+      <button class="btn" style="background:#1b5e20;padding:2px 5px;font-size:10px" onclick="shiftOverlayPrice(${i},-5)" title="下移5美元">▼</button>
       <button class="btn btn-rm" onclick="removeOverlay(${i})">×</button>
     </div>`;
   }).join('');
 }
 
-// ====== 双轴拖动 ======
-// 水平拖动 → 重新获取该线条时间窗口的数据
-// 垂直拖动 → 所有 overlay 线条整体平移价格
-let drag = null;
+// ====== 鼠标拖动 ======
+let dragInfo = null;
 
 function findClosestOverlay(x, y) {
-  const price = mainSeries.coordinateToPrice(y);
-  const time = chart.timeScale().coordinateToTime(x);
+  const chartEl = document.getElementById('chart');
+  const rect = chartEl.getBoundingClientRect();
+  const relX = x - rect.left, relY = y - rect.top;
+  const price = mainSeries?.coordinateToPrice(relY);
+  const time = chart.timeScale().coordinateToTime(relX);
   if (price == null || time == null) return null;
 
   let best = null, bestDist = Infinity;
   for (const o of overlays) {
     if (!o.series || !o.data || !o.data.length) continue;
-    const d = o.data.find(p => (p.time + (o.timeShift || 0)) >= time);
-    if (!d) continue;
-    const lp = d.value + (o.offset || 0);
-    const dist = Math.abs(price - lp);
-    if (dist < bestDist) { bestDist = dist; best = o; }
+    for (const d of o.data) {
+      const t = d.time + (o.timeShift || 0);
+      const p = d.value + (o.offset || 0);
+      const dt = Math.abs(t - time);
+      const dp = Math.abs(p - price);
+      // 接近度 = 时间差(秒) + 价格差(USD)
+      const score = dt * 0.01 + dp;
+      if (score < bestDist && dt < 3600 && dp < 20) {
+        bestDist = score; best = o;
+      }
+    }
   }
-  return best && bestDist < 25 ? best : null;
+  return best && bestDist < 15 ? best : null; // lower = closer
 }
+
+chart.subscribeCrosshairMove(param => {
+  if (!param.point || dragInfo) return;
+  const ov = findClosestOverlay(param.point.x, param.point.y + document.getElementById('chart').getBoundingClientRect().top);
+  document.getElementById('chart').style.cursor = ov ? 'grab' : 'crosshair';
+});
 
 document.getElementById('chart').addEventListener('mousedown', e => {
   if (e.button !== 0 || !mainSeries) return;
-  const rect = e.target.getBoundingClientRect();
-  const ov = findClosestOverlay(e.clientX - rect.left, e.clientY - rect.top);
+  const ov = findClosestOverlay(e.clientX, e.clientY);
   if (!ov) return;
 
-  const price = mainSeries.coordinateToPrice(e.clientY - rect.top);
-  const time = chart.timeScale().coordinateToTime(e.clientX - rect.left);
+  const rect = document.getElementById('chart').getBoundingClientRect();
+  const relX = e.clientX - rect.left, relY = e.clientY - rect.top;
+  const price = mainSeries.coordinateToPrice(relY);
+  const time = chart.timeScale().coordinateToTime(relX);
 
-  drag = {
-    overlay: ov,
-    startX: e.clientX, startY: e.clientY,
+  dragInfo = {
+    ov, startX: e.clientX, startY: e.clientY,
     startPrice: price, startTime: time,
-    // 快照: 所有线条的初始偏移
-    snapshots: overlays.map(o => ({ offset: o.offset || 0, timeShift: o.timeShift || 0 })),
-    initDt: ov.dt,
+    initOffset: ov.offset || 0,
     initTimeShift: ov.timeShift || 0,
-    lastFetchH: 0,
+    initDt: ov.dt,
+    lastFetch: 0,
+    idx: overlays.indexOf(ov),
   };
+  document.getElementById('chart').style.cursor = 'grabbing';
   e.preventDefault();
-});
+  e.stopPropagation();
+}, true);
 
 window.addEventListener('mousemove', e => {
-  if (!drag || !mainSeries) return;
+  if (!dragInfo || !mainSeries) return;
+  const ov = dragInfo.ov;
   const rect = document.getElementById('chart').getBoundingClientRect();
-  const ov = drag.overlay;
+  const relX = e.clientX - rect.left, relY = e.clientY - rect.top;
 
-  // ---- 垂直: 所有线条整体价格平移 ----
-  const curPrice = mainSeries.coordinateToPrice(e.clientY - rect.top);
-  if (curPrice != null) {
-    const pDelta = curPrice - drag.startPrice;
-    overlays.forEach((o, i) => {
-      o.offset = drag.snapshots[i].offset + pDelta;
-    });
+  const curPrice = mainSeries.coordinateToPrice(relY);
+  const curTime = chart.timeScale().coordinateToTime(relX);
+
+  const pDelta = curPrice != null ? curPrice - dragInfo.startPrice : 0;
+  const tDelta = curTime != null ? curTime - dragInfo.startTime : 0;
+
+  ov.offset = dragInfo.initOffset + pDelta;
+  ov.timeShift = dragInfo.initTimeShift + tDelta;
+
+  // 时间偏移超过阈值 → 重新获取数据
+  const tH = ov.timeShift / 3600;
+  if (Math.abs(tH) >= 2 && Date.now() - dragInfo.lastFetch > 1500) {
+    const newDt = shiftDatetime(dragInfo.initDt, Math.round(tH));
+    dragInfo.lastFetch = Date.now();
+    dragInfo.initDt = newDt;
+    dragInfo.initTimeShift = 0;
+    ov.timeShift = 0;
+    dragInfo.startTime = curTime;
+    refetchOverlay(ov, newDt);
+  } else {
+    ov.series.setData(applyOffset(ov));
+    addMarkers(ov);
   }
-
-  // ---- 水平: 目标线条时间偏移 / 重新获取数据 ----
-  const curTime = chart.timeScale().coordinateToTime(e.clientX - rect.left);
-  if (curTime != null) {
-    const tDeltaSec = curTime - drag.startTime;
-    const tDeltaH = tDeltaSec / 3600;
-    ov.timeShift = drag.initTimeShift + tDeltaSec;
-
-    // 超过 2 小时且距上次请求 >1.5s → 重新加载
-    if (Math.abs(tDeltaH) >= 2 && Date.now() - drag.lastFetchH > 1500) {
-      const newDt = shiftDatetime(drag.initDt, Math.round(tDeltaH));
-      drag.lastFetchH = Date.now();
-      drag.initDt = newDt;
-      drag.initTimeShift = 0;
-      ov.timeShift = 0;
-      // 更新快照
-      drag.snapshots = overlays.map(o => ({
-        offset: o.offset || 0,
-        timeShift: o.timeShift || 0,
-      }));
-      refetchOverlay(ov, newDt);
-    }
-  }
-
-  // 批量更新所有线条
-  overlays.forEach(o => { if (o.series && o.data) o.series.setData(applyOffset(o)); });
   renderTags();
 });
 
-window.addEventListener('mouseup', () => { drag = null; });
+window.addEventListener('mouseup', () => {
+  if (dragInfo) document.getElementById('chart').style.cursor = 'crosshair';
+  dragInfo = null;
+});
 
 // ====== Range ======
 function setRange() {
@@ -256,5 +321,4 @@ function setRange() {
 
 document.getElementById('rangeH').addEventListener('change', setRange);
 
-// ====== Startup ======
 initMain();
