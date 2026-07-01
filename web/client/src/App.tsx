@@ -77,12 +77,12 @@ export default function App() {
       time: Math.floor(new Date(r.dt).getTime() / 1000) as Time,
       value: r[mode], usd: r.usd, cny: r.cny,
     }));
-    if (mainRef.current) mainRef.current.setData(data);
-    else if (chartRef.current) {
-      const s = chartRef.current.addLineSeries({ color: MAIN_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
-      s.setData(data);
-      mainRef.current = s;
-      chartRef.current.timeScale().fitContent();
+    if (!mainRef.current && chartRef.current) {
+      mainRef.current = chartRef.current.addLineSeries({ color: MAIN_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+    }
+    if (mainRef.current) {
+      mainRef.current.setData(data);
+      chartRef.current?.timeScale().fitContent();
     }
     const last = rows[rows.length - 1];
     setPrice({ usd: last.usd?.toFixed(1) || '—', cny: last.cny?.toFixed(2) || '—' });
