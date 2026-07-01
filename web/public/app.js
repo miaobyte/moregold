@@ -207,10 +207,6 @@ function renderTags() {
     return `<div class="ov-tag" style="border-color:${o.color}">
       <span class="dot" style="background:${o.color};cursor:grab" title="拖动线条或按钮调节"></span>
       ${o.label} ±${o.window}h${txt}
-      <button class="btn" style="background:#1a237e;padding:2px 5px;font-size:10px" onclick="shiftOverlayTime(${i},-1)" title="左移1小时">◀</button>
-      <button class="btn" style="background:#1a237e;padding:2px 5px;font-size:10px" onclick="shiftOverlayTime(${i},1)" title="右移1小时">▶</button>
-      <button class="btn" style="background:#1b5e20;padding:2px 5px;font-size:10px" onclick="shiftOverlayPrice(${i},5)" title="上移5美元">▲</button>
-      <button class="btn" style="background:#1b5e20;padding:2px 5px;font-size:10px" onclick="shiftOverlayPrice(${i},-5)" title="下移5美元">▼</button>
       <button class="btn btn-rm" onclick="removeOverlay(${i})">×</button>
     </div>`;
   }).join('');
@@ -245,11 +241,65 @@ function findClosestOverlay(x, y) {
   return best && bestDist < 15 ? best : null; // lower = closer
 }
 
-chart.subscribeCrosshairMove(param => {
-  if (!param.point || dragInfo) return;
-  const ov = findClosestOverlay(param.point.x, param.point.y + document.getElementById('chart').getBoundingClientRect().top);
-  document.getElementById('chart').style.cursor = ov ? 'grab' : 'crosshair';
+// ====== Tooltip ======
+const tooltip = document.createElement('div');
+Object.assign(tooltip.style, {
+  display: 'none', position: 'fixed', top: '42px', right: '12px',
+  background: 'rgba(30,34,45,0.93)', border: '1px solid #3a3e4a',
+  borderRadius: '4px', padding: '8px 12px', fontSize: '12px',
+  zIndex: '1000', pointerEvents: 'none', whiteSpace: 'nowrap',
+  boxShadow: '0 2px 10px rgba(0,0,0,0.6)', fontFamily: 'monospace',
+  minWidth: '220px',
 });
+document.body.appendChild(tooltip);
+
+function formatDate(ts) {
+  const d = new Date(ts * 1000);
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' +
+    String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+chart.subscribeCrosshairMove(param => {
+  if (dragInfo) { tooltip.style.display = 'none'; return; }
+  if (!param.time || !param.seriesData || param.seriesData.size === 0) {
+    tooltip.style.display = 'none'; return;
+  }
+
+  const ov = param.point ? findClosestOverlay(param.point.x, param.point.y + document.getElementById('chart').getBoundingClientRect().top) : null;
+  document.getElementById('chart').style.cursor = ov ? 'grab' : 'crosshair';
+
+  const lines = [];
+  const time = param.time;
+  const sd = param.seriesData;
+
+  const mv = sd.get(mainSeries);
+  if (mv != null) {
+    const v = mv.value ?? mv.close;
+    const cny = v ? (v * 7.0 / 31.1035).toFixed(2) : '\u2014';
+    lines.push('<span style="color:#ffffff">\u25CF</span> <b>实时</b> US$' + (v?.toFixed(1)||'\u2014') + ' \u00A5' + cny + '  ' + formatDate(time));
+  }
+
+  overlays.forEach(o => {
+    if (!o.series) return;
+    const ov = sd.get(o.series);
+    if (ov == null || !o.data) return;
+    const v = ov.value ?? ov.close;
+    const dp = o.data.find(d => Math.abs((d.time + (o.timeShift || 0)) - time) < 180);
+    const usd = v?.toFixed(1) || '\u2014';
+    const cny = dp?.cny?.toFixed(2) || (v ? (v * 7.0 / 31.1035).toFixed(2) : '\u2014');
+    const origT = dp ? dp.time : time;
+    lines.push('<span style="color:' + o.color + '">\u25CF</span> <b>' + o.label + '</b> US$' + usd + ' \u00A5' + cny + '  ' + formatDate(origT));
+  });
+
+  if (lines.length > 0) {
+    tooltip.innerHTML = lines.join('<br>');
+    tooltip.style.display = 'block';
+  } else {
+    tooltip.style.display = 'none';
+  }
+});
+
+document.getElementById('chart').addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
 document.getElementById('chart').addEventListener('mousedown', e => {
   if (e.button !== 0 || !mainSeries) return;
