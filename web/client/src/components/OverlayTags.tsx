@@ -1,4 +1,6 @@
-import type { Overlay } from '../types';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import type { Overlay } from '@/types';
 
 interface Props {
   overlays: Overlay[];
@@ -7,18 +9,22 @@ interface Props {
 
 export function OverlayTags({ overlays, onRemove }: Props) {
   if (!overlays.length) return null;
+
   return (
-    <div className="overlay-bar">
-      {overlays.map((o, i) => {
-        const info = [];
-        return (
-          <div key={i} className="ov-tag" style={{borderLeft:`3px solid ${o.color}`}}>
-            <span className="ov-dot" style={{background:o.color}} />
-            {o.label} ±{o.window}h
-            <button className="ov-rm" onClick={() => onRemove(i)}>×</button>
-          </div>
-        );
-      })}
+    <div className="flex gap-1.5 flex-wrap px-3 py-1 bg-panel text-[11px]">
+      {overlays.map((o, i) => (
+        <Badge
+          key={i}
+          className="gap-1.5 pl-1.5 border-l-[3px]"
+          style={{ borderLeftColor: o.color }}
+        >
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: o.color }} />
+          {o.label} ±{o.window}h
+          <Button variant="destructive" size="icon" className="h-4 w-4 text-[10px] leading-none" onClick={() => onRemove(i)}>
+            ×
+          </Button>
+        </Badge>
+      ))}
     </div>
   );
 }

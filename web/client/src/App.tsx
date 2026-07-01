@@ -1,13 +1,12 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { createChart, ColorType, type IChartApi, type ISeriesApi, type Time } from 'lightweight-charts';
-import { Controls } from './components/Controls';
-import { OverlayTags } from './components/OverlayTags';
-import { InfoPanel } from './components/InfoPanel';
-import { useSSE } from './hooks/useSSE';
-import { fetchRecent } from './utils/api';
-import { MAIN_COLOR, getGranularity } from './utils/constants';
-import type { Overlay, Granularity, PricePoint } from './types';
-import './App.css';
+import { Controls } from '@/components/Controls';
+import { OverlayTags } from '@/components/OverlayTags';
+import { InfoPanel } from '@/components/InfoPanel';
+import { useSSE } from '@/hooks/useSSE';
+import { fetchRecent } from '@/utils/api';
+import { MAIN_COLOR, getGranularity } from '@/utils/constants';
+import type { Overlay, Granularity, PricePoint } from '@/types';
 
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -21,8 +20,10 @@ export default function App() {
   const [infoLines, setInfoLines] = useState<any[]>([]);
   const lastPriceRef = useRef<any>(null);
   const overlaysRef = useRef<Overlay[]>([]);
+  const granRef = useRef<Granularity>(gran);
 
   useEffect(() => { overlaysRef.current = overlays; }, [overlays]);
+  useEffect(() => { granRef.current = gran; }, [gran]);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
@@ -111,7 +112,8 @@ export default function App() {
     const color = COLORS[overlays.length % COLORS.length];
     const o: Overlay = { dt, window: w, color, label: dt.slice(0,16), series: null, offset: 0, timeShift: 0, data: null };
     const off = (() => { const d2 = new Date(dt); d2.setHours(0,0,0,0); const t2 = new Date(); t2.setHours(0,0,0,0); return Math.round((t2.getTime() - d2.getTime()) / 86400000); })();
-    const r = await fetch(`/api/around?dt=${encodeURIComponent(dt)}&hours=${w}&granularity=5`).then(r => r.json());
+    const g = granRef.current;
+    const r = await fetch(`/api/around?dt=${encodeURIComponent(dt)}&hours=${w}&granularity=${g}`).then(r => r.json());
     if (!r.length) return;
     o.data = r.map((rx: any) => {
       const d3 = new Date(rx.dt); d3.setDate(d3.getDate() + off);
@@ -132,18 +134,35 @@ export default function App() {
     updateInfo();
   }, [updateInfo]);
 
+  // 粒度切换时重载所有叠加线
+  useEffect(() => {
+    if (!chartRef.current) return;
+    overlaysRef.current.forEach(async (o) => {
+      if (!o.series) return;
+      const off = (() => { const d2 = new Date(o.dt); d2.setHours(0,0,0,0); const t2 = new Date(); t2.setHours(0,0,0,0); return Math.round((t2.getTime() - d2.getTime()) / 86400000); })();
+      const r = await fetch(`/api/around?dt=${encodeURIComponent(o.dt)}&hours=${o.window}&granularity=${gran}`).then(r => r.json());
+      if (!r.length) return;
+      o.data = r.map((rx: any) => {
+        const d3 = new Date(rx.dt); d3.setDate(d3.getDate() + off);
+        return { time: Math.floor(d3.getTime()/1000) as Time, value: rx.usd, usd: rx.usd, cny: rx.cny, origTime: d3.getTime()/1000 };
+      });
+      o.series.setData(o.data.map(p => ({ time: (p.time as number) + (o.timeShift||0), value: p.value + (o.offset||0) })));
+    });
+    updateInfo();
+  }, [gran]);
+
   return (
     <>
-      <div className="topbar">
-        <h1>🥇 GoldView</h1>
-        <div className="prices">
-          <span>💰 <span className="v" style={{color:'#4fc3f7'}}>{price.usd}</span> USD</span>
-          <span>💴 <span className="v" style={{color:'#81c784'}}>{price.cny}</span> CNY</span>
+      <div className="flex items-center justify-between px-3 py-1.5 bg-panel border-b border-border min-h-[38px]">
+        <h1 className="text-[15px] text-gold">🥇 GoldView</h1>
+        <div className="flex gap-3.5 text-[13px]">
+          <span>💰 <span className="font-bold text-[15px]" style={{color:'#4fc3f7'}}>{price.usd}</span> USD</span>
+          <span>💴 <span className="font-bold text-[15px]" style={{color:'#81c784'}}>{price.cny}</span> CNY</span>
         </div>
       </div>
       <Controls onAdd={addOverlay} onRange={h => chartRef.current?.timeScale().setVisibleRange({from: Date.now()/1000 - h*3600, to: Date.now()/1000})} onGran={g => { setManualGran(g as any); if (g) setGran(g as Granularity); }} />
       <OverlayTags overlays={overlays} onRemove={removeOverlay} />
-      <div className="chart-area" ref={containerRef} />
+      <div className="flex-1 relative" ref={containerRef} />
       <InfoPanel lines={infoLines} />
     </>
   );

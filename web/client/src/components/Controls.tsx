@@ -1,11 +1,14 @@
 import { useRef } from 'react';
-import { GRAN_OPTIONS, RANGE_OPTIONS } from '../utils/constants';
-import type { Granularity } from '../types';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { GRAN_OPTIONS, RANGE_OPTIONS } from '@/utils/constants';
+import type { Granularity } from '@/types';
 
 interface Props {
   onAdd: (dt: string, w: number) => void;
   onRange: (h: number) => void;
-  onGran: (g: Granularity|0) => void;
+  onGran: (g: Granularity | 0) => void;
 }
 
 export function Controls({ onAdd, onRange, onGran }: Props) {
@@ -23,21 +26,34 @@ export function Controls({ onAdd, onRange, onGran }: Props) {
   };
 
   return (
-    <div className="controls">
-      <label>⏱ 对比</label>
-      <input type="date" ref={dateRef} />
-      <input type="time" ref={timeRef} step={60} />
-      <label>±</label>
-      <input type="number" ref={winRef} defaultValue={24} min={1} max={168} />h
-      <button className="ctr-btn" onClick={handleAdd}>+ 添加</button>
-      <label>范围</label>
-      <select onChange={e => onRange(parseInt(e.target.value))} defaultValue="24">
-        {RANGE_OPTIONS.map(([v,l]) => <option key={v} value={v}>{l}</option>)}
-      </select>
-      <label>K线</label>
-      <select onChange={e => onGran(parseInt(e.target.value) as Granularity|0)} defaultValue="auto">
-        {GRAN_OPTIONS.map(([v,l]) => <option key={v} value={v}>{l}</option>)}
-      </select>
+    <div className="flex gap-2 items-center flex-wrap px-3 py-1 bg-panel border-b border-border text-xs">
+      <span className="text-muted">⏱ 对比</span>
+      <Input type="date" ref={dateRef} className="w-[130px]" />
+      <Input type="time" ref={timeRef} step={60} className="w-[110px]" />
+      <span>±</span>
+      <Input type="number" ref={winRef} defaultValue={24} min={1} max={168} className="w-14" />
+      <span>h</span>
+      <Button size="sm" onClick={handleAdd}>+ 添加</Button>
+
+      <span className="text-muted ml-2">范围</span>
+      <Select defaultValue="24" onValueChange={v => onRange(parseInt(v))}>
+        <SelectTrigger className="w-[72px]">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {RANGE_OPTIONS.map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
+        </SelectContent>
+      </Select>
+
+      <span className="text-muted">K线</span>
+      <Select defaultValue="auto" onValueChange={v => onGran(parseInt(v) as Granularity | 0)}>
+        <SelectTrigger className="w-[72px]">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {GRAN_OPTIONS.map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
+        </SelectContent>
+      </Select>
     </div>
   );
 }
