@@ -59,3 +59,6 @@ data/macro/
 
 # Screenshots
 web/screenshot-*.png
+
+# Build artifacts
+web/public/assets/
