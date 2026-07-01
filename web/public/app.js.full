@@ -371,8 +371,7 @@ async function reloadMain(gran) {
 }
 
 async function reloadOverlay(o, gran) {
-  try {
-  if (!o.dt || !o.series) return;
+  if (!o.dt) return;
   const mode = document.getElementById('yMode').value;
   const rows = await api('/around?dt=' + encodeURIComponent(o.dt) + '&hours=' + o.window + '&granularity=' + gran);
   if (!rows.length) return;
@@ -381,11 +380,11 @@ async function reloadOverlay(o, gran) {
   const dayOffset = Math.round((today - ovDate) / 86400000);
   o.data = rows.map(r => {
     const d = new Date(r.dt); d.setDate(d.getDate() + dayOffset);
-    return { time: Math.floor(d.getTime() / 1000), value: Number(r[mode])||0, usd: Number(r.usd)||0, cny: Number(r.cny)||0, origTime: d.getTime() / 1000 };
+    return { time: Math.floor(d.getTime() / 1000), value: r[mode], usd: r.usd, cny: r.cny, origTime: d.getTime() / 1000 };
   });
-  const ad = applyOffset(o);
-  if (ad.length > 0) o.series.setData(ad);
-  } catch(e) { console.error('reloadOverlay error:', e, o); }
+  const vr2 = chart.timeScale().getVisibleRange();
+  if (o.series) o.series.setData(applyOffset(o));
+  if (vr2) chart.timeScale().setVisibleRange(vr2);
 }
 
 initMain();
