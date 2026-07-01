@@ -21,7 +21,6 @@ export default function App() {
   const [tooltipLines, setTooltipLines] = useState<any[]>([]);
   const dragRef = useRef<any>(null);
 
-  // Chart init
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return;
     const c = createChart(containerRef.current, {
@@ -35,7 +34,6 @@ export default function App() {
     });
     chartRef.current = c;
 
-    // Zoom → granularity
     c.timeScale().subscribeVisibleTimeRangeChange(async (range) => {
       if (!range?.from || !range?.to || manualGran) return;
       const span = range.to - range.from;
@@ -45,7 +43,6 @@ export default function App() {
       setGran(g);
     });
 
-    // Crosshair → tooltip
     c.subscribeCrosshairMove((param) => {
       if (!param.time || !param.seriesData || dragRef.current) { setTooltipLines([]); return; }
       const lines: any[] = [];
@@ -73,7 +70,6 @@ export default function App() {
     return () => { c.remove(); chartRef.current = null; };
   }, []);
 
-  // Load main data
   const loadMain = useCallback(async (g: Granularity) => {
     const rows = await fetchRecent(24, g);
     if (!rows.length) return;
@@ -83,10 +79,7 @@ export default function App() {
     }));
     if (mainRef.current) mainRef.current.setData(data);
     else if (chartRef.current) {
-      const s = chartRef.current.addLineSeries({
-        color: MAIN_COLOR, lineWidth: 2,
-        priceLineVisible: false, lastValueVisible: false,
-      });
+      const s = chartRef.current.addLineSeries({ color: MAIN_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
       s.setData(data);
       mainRef.current = s;
       chartRef.current.timeScale().fitContent();
@@ -97,34 +90,28 @@ export default function App() {
 
   useEffect(() => { loadMain(gran); }, [gran, mode]);
 
-  // SSE
   useSSE((d) => {
     const ts = Math.floor(new Date(d.dt).getTime() / 1000) as Time;
     mainRef.current?.update({ time: ts, value: d[mode] });
     setPrice({ usd: d.usd.toFixed(1), cny: d.cny.toFixed(2) });
   });
 
-  // Add overlay
   const addOverlay = useCallback(async (dt: string, w: number) => {
     const c = chartRef.current;
     if (!c) return;
     const COLORS = ['#ff7043','#81c784','#ba68c8','#ffd54f','#4dd0e1','#f06292','#aed581','#ff8a65','#90a4ae'];
     const color = COLORS[overlays.length % COLORS.length];
     const o: Overlay = { dt, window: w, color, label: dt.slice(0,16), series: null, offset: 0, timeShift: 0, data: null };
-    const rows = await fetchRecent(24, 5);
-    // Wait use around
     const off = (() => { const d2 = new Date(dt); d2.setHours(0,0,0,0); const t2 = new Date(); t2.setHours(0,0,0,0); return Math.round((t2.getTime() - d2.getTime()) / 86400000); })();
-    (async () => {
-      const r = await fetch(`/api/around?dt=${encodeURIComponent(dt)}&hours=${w}&granularity=5`).then(r => r.json());
-      if (!r.length) return;
-      o.data = r.map((rx: any) => {
-        const d3 = new Date(rx.dt); d3.setDate(d3.getDate() + off);
-        return { time: Math.floor(d3.getTime()/1000) as Time, value: rx[mode], usd: rx.usd, cny: rx.cny, origTime: d3.getTime()/1000 };
-      });
-      o.series = c.addLineSeries({ color, lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
-      o.series.setData(o.data.map(p => ({ time: (p.time as number) + (o.timeShift||0), value: p.value + (o.offset||0) })));
-      setOverlays(prev => [...prev, o]);
-    })();
+    const r = await fetch(`/api/around?dt=${encodeURIComponent(dt)}&hours=${w}&granularity=5`).then(r => r.json());
+    if (!r.length) return;
+    o.data = r.map((rx: any) => {
+      const d3 = new Date(rx.dt); d3.setDate(d3.getDate() + off);
+      return { time: Math.floor(d3.getTime()/1000) as Time, value: rx[mode], usd: rx.usd, cny: rx.cny, origTime: d3.getTime()/1000 };
+    });
+    o.series = c.addLineSeries({ color, lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
+    o.series.setData(o.data.map(p => ({ time: (p.time as number) + (o.timeShift||0), value: p.value + (o.offset||0) })));
+    setOverlays(prev => [...prev, o]);
   }, [overlays.length, mode]);
 
   const removeOverlay = useCallback((i: number) => {
@@ -146,7 +133,7 @@ export default function App() {
       </div>
       <Controls onAdd={addOverlay} onYMode={setMode} onRange={h => chartRef.current?.timeScale().setVisibleRange({from: Date.now()/1000 - h*3600, to: Date.now()/1000})} onGran={g => { setManualGran(g as any); if (g) setGran(g as Granularity); }} />
       <OverlayTags overlays={overlays} onRemove={removeOverlay} />
-      <div className="chart-area" ref={containerRef} style={{cursor:'crosshair'}} />
+      <div className="chart-area" ref={containerRef} />
       <Tooltip lines={tooltipLines} />
     </>
   );
