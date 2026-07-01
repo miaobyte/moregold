@@ -4,12 +4,11 @@ import type { Granularity } from '../types';
 
 interface Props {
   onAdd: (dt: string, w: number) => void;
-  onYMode: (m: 'usd'|'cny') => void;
   onRange: (h: number) => void;
   onGran: (g: Granularity|0) => void;
 }
 
-export function Controls({ onAdd, onYMode, onRange, onGran }: Props) {
+export function Controls({ onAdd, onRange, onGran }: Props) {
   const dateRef = useRef<HTMLInputElement>(null);
   const timeRef = useRef<HTMLInputElement>(null);
   const winRef = useRef<HTMLInputElement>(null);
@@ -31,7 +30,6 @@ export function Controls({ onAdd, onYMode, onRange, onGran }: Props) {
       <label>±</label>
       <input type="number" ref={winRef} defaultValue={24} min={1} max={168} />h
       <button className="ctr-btn" onClick={handleAdd}>+ 添加</button>
-      <YMode onChange={onYMode} />
       <label>范围</label>
       <select onChange={e => onRange(parseInt(e.target.value))} defaultValue="24">
         {RANGE_OPTIONS.map(([v,l]) => <option key={v} value={v}>{l}</option>)}
@@ -41,16 +39,5 @@ export function Controls({ onAdd, onYMode, onRange, onGran }: Props) {
         {GRAN_OPTIONS.map(([v,l]) => <option key={v} value={v}>{l}</option>)}
       </select>
     </div>
-  );
-}
-
-function YMode({ onChange }: { onChange: (m: 'usd'|'cny') => void }) {
-  return (
-    <>
-      <label style={{marginLeft:8}}>Y轴</label>
-      <select onChange={e => onChange(e.target.value as 'usd'|'cny')}>
-        <option value="usd">USD/oz</option><option value="cny">CNY/g</option>
-      </select>
-    </>
   );
 }

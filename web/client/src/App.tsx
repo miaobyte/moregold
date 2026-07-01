@@ -6,14 +6,14 @@ import { Tooltip } from './components/Tooltip';
 import { useSSE } from './hooks/useSSE';
 import { fetchRecent } from './utils/api';
 import { MAIN_COLOR, getGranularity } from './utils/constants';
-import type { Overlay, PriceMode, Granularity, PricePoint } from './types';
+import type { Overlay, Granularity, PricePoint } from './types';
 import './App.css';
 
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const mainRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const [mode, setMode] = useState<PriceMode>('usd');
+  const cnyRef = useRef<ISeriesApi<'Line'> | null>(null);
   const [price, setPrice] = useState({ usd: '—', cny: '—' });
   const [overlays, setOverlays] = useState<Overlay[]>([]);
   const [gran, setGran] = useState<Granularity>(1);
@@ -27,7 +27,8 @@ export default function App() {
       layout: { background: { type: ColorType.Solid, color: '#131722' }, textColor: '#787b86' },
       grid: { vertLines: { color: '#1e222d' }, horzLines: { color: '#1e222d' } },
       crosshair: { mode: 1 },
-      rightPriceScale: { borderColor: '#2a2e39' },
+      rightPriceScale: { borderColor: '#4fc3f7', scaleMargins: { top: 0.05, bottom: 0.05 } },
+      leftPriceScale: { borderColor: '#81c784', visible: true, scaleMargins: { top: 0.05, bottom: 0.05 } },
       timeScale: { borderColor: '#2a2e39', timeVisible: true, secondsVisible: false },
       handleScroll: { vertTouchDrag: true, horzTouchDrag: true, mouseWheel: true },
       handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
@@ -53,17 +54,10 @@ export default function App() {
       const mv = param.seriesData.get(mainRef.current!);
       if (mv != null) {
         const v = (mv as any).value ?? (mv as any).close;
-        lines.push({ name: '实时', usd: v?.toFixed(1) || '—', cny: (v ? (v * 7 / 31.1035).toFixed(2) : '—'), time: fmt(param.time as number), color: MAIN_COLOR });
+        const cv = param.seriesData.get(cnyRef.current!);
+        const cnyVal = cv != null ? (cv as any).value ?? (cv as any).close : (v * 7.0 / 31.1035);
+        lines.push({ name: '实时', usd: v?.toFixed(1) || '—', cny: cnyVal?.toFixed(2) || '—', time: fmt(param.time as number), color: MAIN_COLOR });
       }
-      overlays.forEach(o => {
-        if (!o.series || !o.data) return;
-        const ov = param.seriesData.get(o.series);
-        if (ov == null) return;
-        const v = (ov as any).value ?? (ov as any).close;
-        const dp = o.data.find(d => Math.abs(((d.time as number) + (o.timeShift || 0)) - (param.time as number)) < 180);
-        const origT = dp?.origTime || dp?.time || param.time;
-        lines.push({ name: o.label, usd: v?.toFixed(1) || '—', cny: dp?.cny?.toFixed(2) || '—', time: fmt(typeof origT === 'number' ? origT : origT as number), color: o.color });
-      });
       setTooltipLines(lines);
     });
 
@@ -73,26 +67,31 @@ export default function App() {
   const loadMain = useCallback(async (g: Granularity) => {
     const rows = await fetchRecent(24, g);
     if (!rows.length) return;
-    const data: PricePoint[] = rows.map(r => ({
+    const usdData: PricePoint[] = rows.map(r => ({
       time: Math.floor(new Date(r.dt).getTime() / 1000) as Time,
-      value: r[mode], usd: r.usd, cny: r.cny,
+      value: r.usd, usd: r.usd, cny: r.cny,
+    }));
+    const cnyData: PricePoint[] = rows.map(r => ({
+      time: Math.floor(new Date(r.dt).getTime() / 1000) as Time,
+      value: r.cny || (r.usd * 7.0 / 31.1035), usd: r.usd, cny: r.cny,
     }));
     if (!mainRef.current && chartRef.current) {
       mainRef.current = chartRef.current.addLineSeries({ color: MAIN_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
+      cnyRef.current = chartRef.current.addLineSeries({ color: '#81c784', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: 'left', visible: false });
     }
-    if (mainRef.current) {
-      mainRef.current.setData(data);
-      chartRef.current?.timeScale().fitContent();
-    }
+    mainRef.current?.setData(usdData);
+    cnyRef.current?.setData(cnyData);
+    chartRef.current?.timeScale().fitContent();
     const last = rows[rows.length - 1];
     setPrice({ usd: last.usd?.toFixed(1) || '—', cny: last.cny?.toFixed(2) || '—' });
-  }, [mode]);
+  }, []);
 
-  useEffect(() => { loadMain(gran); }, [gran, mode]);
+  useEffect(() => { loadMain(gran); }, [gran]);
 
   useSSE((d) => {
     const ts = Math.floor(new Date(d.dt).getTime() / 1000) as Time;
-    mainRef.current?.update({ time: ts, value: d[mode] });
+    mainRef.current?.update({ time: ts, value: d.usd });
+    cnyRef.current?.update({ time: ts, value: d.cny || (d.usd * 7.0 / 31.1035) });
     setPrice({ usd: d.usd.toFixed(1), cny: d.cny.toFixed(2) });
   });
 
@@ -107,12 +106,12 @@ export default function App() {
     if (!r.length) return;
     o.data = r.map((rx: any) => {
       const d3 = new Date(rx.dt); d3.setDate(d3.getDate() + off);
-      return { time: Math.floor(d3.getTime()/1000) as Time, value: rx[mode], usd: rx.usd, cny: rx.cny, origTime: d3.getTime()/1000 };
+      return { time: Math.floor(d3.getTime()/1000) as Time, value: rx.usd, usd: rx.usd, cny: rx.cny, origTime: d3.getTime()/1000 };
     });
     o.series = c.addLineSeries({ color, lineWidth: 1.5, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
     o.series.setData(o.data.map(p => ({ time: (p.time as number) + (o.timeShift||0), value: p.value + (o.offset||0) })));
     setOverlays(prev => [...prev, o]);
-  }, [overlays.length, mode]);
+  }, [overlays.length]);
 
   const removeOverlay = useCallback((i: number) => {
     setOverlays(prev => {
@@ -127,11 +126,11 @@ export default function App() {
       <div className="topbar">
         <h1>🥇 GoldView</h1>
         <div className="prices">
-          <span>💰 <span className="v" style={{color:'#4fc3f7'}}>{price.usd}</span> USD</span>
-          <span>💴 <span className="v" style={{color:'#81c784'}}>{price.cny}</span> CNY</span>
+          <span>💰 <span className="v" style={{color:'#4fc3f7'}}>{price.usd}</span> USD (右轴)</span>
+          <span>💴 <span className="v" style={{color:'#81c784'}}>{price.cny}</span> CNY (左轴)</span>
         </div>
       </div>
-      <Controls onAdd={addOverlay} onYMode={setMode} onRange={h => chartRef.current?.timeScale().setVisibleRange({from: Date.now()/1000 - h*3600, to: Date.now()/1000})} onGran={g => { setManualGran(g as any); if (g) setGran(g as Granularity); }} />
+      <Controls onAdd={addOverlay} onRange={h => chartRef.current?.timeScale().setVisibleRange({from: Date.now()/1000 - h*3600, to: Date.now()/1000})} onGran={g => { setManualGran(g as any); if (g) setGran(g as Granularity); }} />
       <OverlayTags overlays={overlays} onRemove={removeOverlay} />
       <div className="chart-area" ref={containerRef} />
       <Tooltip lines={tooltipLines} />
