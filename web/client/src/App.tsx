@@ -77,7 +77,7 @@ export default function App() {
     }));
     if (!mainRef.current && chartRef.current) {
       mainRef.current = chartRef.current.addLineSeries({ color: MAIN_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
-      cnyRef.current = chartRef.current.addLineSeries({ color: '#81c784', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: 'left', visible: false });
+      cnyRef.current = chartRef.current.addLineSeries({ color: '#81c784', lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceScaleId: 'left', visible: true });
     }
     mainRef.current?.setData(usdData);
     cnyRef.current?.setData(cnyData);
