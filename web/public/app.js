@@ -67,7 +67,7 @@ async function initMain() {
   }));
 
   if (mainSeries) chart.removeSeries(mainSeries);
-  mainSeries = makeSeries('#4fc3f7', false);
+  mainSeries = makeSeries('#ffffff', false);
   mainSeries.setData(data);
   chart.timeScale().fitContent();
 
@@ -320,5 +320,52 @@ function setRange() {
 }
 
 document.getElementById('rangeH').addEventListener('change', setRange);
+
+
+// ====== 缩放自动切换粒度 ======
+function getGranularity(visibleSec) {
+  if (visibleSec < 12 * 3600) return 1;
+  if (visibleSec < 3 * 86400) return 5;
+  if (visibleSec < 14 * 86400) return 60;
+  return 1440;
+}
+
+let currentGranularity = 1;
+chart.timeScale().subscribeVisibleTimeRangeChange(async (range) => {
+  if (!range) return;
+  const g = getGranularity(range.to - range.from);
+  if (g === currentGranularity) return;
+  currentGranularity = g;
+  await reloadMain(g);
+  overlays.forEach(o => reloadOverlay(o, g));
+});
+
+async function reloadMain(gran) {
+  const mode = document.getElementById('yMode').value;
+  const rangeH = parseInt(document.getElementById('rangeH').value);
+  const h = Math.max(rangeH, 6);
+  const rows = await api('/recent?hours=' + h + '&granularity=' + gran);
+  if (!rows.length) return;
+  const data = rows.map(r => ({
+    time: Math.floor(new Date(r.dt).getTime() / 1000),
+    value: r[mode], usd: r.usd, cny: r.cny,
+  }));
+  mainSeries.setData(data);
+}
+
+async function reloadOverlay(o, gran) {
+  if (!o.dt) return;
+  const mode = document.getElementById('yMode').value;
+  const rows = await api('/around?dt=' + encodeURIComponent(o.dt) + '&hours=' + o.window + '&granularity=' + gran);
+  if (!rows.length) return;
+  const ovDate = new Date(o.dt); ovDate.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const dayOffset = Math.round((today - ovDate) / 86400000);
+  o.data = rows.map(r => {
+    const d = new Date(r.dt); d.setDate(d.getDate() + dayOffset);
+    return { time: Math.floor(d.getTime() / 1000), value: r[mode], usd: r.usd, cny: r.cny, origTime: d.getTime() / 1000 };
+  });
+  if (o.series) o.series.setData(applyOffset(o));
+}
 
 initMain();
