@@ -336,6 +336,7 @@ document.getElementById('rangeH').addEventListener('change', setRange);
 
 // ====== 缩放自动切换粒度 ======
 function getGranularity(visibleSec) {
+  if (!visibleSec || visibleSec < 0) return 5;
   if (visibleSec < 12 * 3600) return 1;
   if (visibleSec < 3 * 86400) return 5;
   if (visibleSec < 14 * 86400) return 60;
@@ -344,8 +345,10 @@ function getGranularity(visibleSec) {
 
 let currentGranularity = 1;
 chart.timeScale().subscribeVisibleTimeRangeChange(async (range) => {
-  if (!range) return;
-  const g = getGranularity(range.to - range.from);
+  if (!range || !range.from || !range.to) return;
+  const span = range.to - range.from;
+  if (span < 300 || span > 365 * 86400) return;
+  const g = getGranularity(span);
   if (g === currentGranularity) return;
   currentGranularity = g;
   await reloadMain(g);
