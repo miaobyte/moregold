@@ -344,16 +344,44 @@ function getGranularity(visibleSec) {
 }
 
 let currentGranularity = 1;
+let manualGranularity = 0; // 0=auto, 1/5/60/1440=manual
 chart.timeScale().subscribeVisibleTimeRangeChange(async (range) => {
   if (!range || !range.from || !range.to) return;
+  if (manualGranularity) return; // 手动模式, 不自动切换
   const span = range.to - range.from;
   if (span < 300 || span > 365 * 86400) return;
   const g = getGranularity(span);
   if (g === currentGranularity) return;
   currentGranularity = g;
+  document.getElementById('kline').value = 'auto';
   await reloadMain(g);
   overlays.forEach(o => reloadOverlay(o, g));
 });
+
+async function setGranularity() {
+  const v = document.getElementById('kline').value;
+  if (v === 'auto') {
+    manualGranularity = 0;
+    // 触发一次自动检测
+    const range = chart.timeScale().getVisibleRange();
+    if (range) {
+      const g = getGranularity(range.to - range.from);
+      if (g !== currentGranularity) {
+        currentGranularity = g;
+        await reloadMain(g);
+        overlays.forEach(o => reloadOverlay(o, g));
+      }
+    }
+  } else {
+    const g = parseInt(v);
+    manualGranularity = g;
+    if (g !== currentGranularity) {
+      currentGranularity = g;
+      await reloadMain(g);
+      overlays.forEach(o => reloadOverlay(o, g));
+    }
+  }
+}
 
 async function reloadMain(gran) {
   const mode = document.getElementById('yMode').value;

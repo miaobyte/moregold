@@ -50,6 +50,14 @@ body{background:#131722;color:#d1d4dc;font-family:-apple-system,system-ui,sans-s
   <select id="rangeH" onchange="setRange()">
     <option value="6">6h</option><option value="12">12h</option><option value="24" selected>24h</option><option value="48">2d</option><option value="72">3d</option>
   </select>
+  <label>K线</label>
+  <select id="kline" onchange="setGranularity()">
+    <option value="auto">自动</option>
+    <option value="1">1分</option>
+    <option value="5">5分</option>
+    <option value="60">1时</option>
+    <option value="1440">日</option>
+  </select>
 </div>
 <div class="overlays" id="overlayTags"></div>
 <div id="chart"></div>
