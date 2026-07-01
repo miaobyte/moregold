@@ -56,25 +56,11 @@ function shiftDatetime(dtStr, h) {
 async function initMain() {
   const mode = document.getElementById('yMode').value;
   window._col = mode;
-  const rangeH = parseInt(document.getElementById('rangeH').value);
-  const h = Math.max(rangeH, 6);
-  const rows = await api('/recent?hours=' + h);
-  if (!rows.length) return;
-
-  const data = rows.map(r => ({
-    time: Math.floor(new Date(r.dt).getTime() / 1000),
-    value: r[mode],
-  }));
-
-  if (mainSeries) chart.removeSeries(mainSeries);
-  mainSeries = makeSeries('#ffffff', false);
-  mainSeries.setData(data);
-  chart.timeScale().fitContent();
-
-  const last = rows[rows.length - 1];
-  document.getElementById('pUsd').textContent = last.usd?.toFixed(1) ?? '—';
-  document.getElementById('pCny').textContent = last.cny?.toFixed(2) ?? '—';
-
+  if (!mainSeries) mainSeries = makeSeries('#ffffff', false);
+  // 用当前时间范围确定初始粒度, 与缩放逻辑一致
+  const rangeH = parseInt(document.getElementById('rangeH').value) || 24;
+  currentGranularity = getGranularity(rangeH * 3600);
+  await reloadMain(currentGranularity);
   startSSE();
 }
 
@@ -276,7 +262,7 @@ chart.subscribeCrosshairMove(param => {
   if (mv != null) {
     const v = mv.value ?? mv.close;
     const cny = v ? (v * 7.0 / 31.1035).toFixed(2) : '\u2014';
-    lines.push('<span style="color:#ffffff">\u25CF</span> <b>实时</b> US$' + (v?.toFixed(1)||'\u2014') + ' \u00A5' + cny + '  ' + formatDate(time));
+    lines.push('<span style="color:#ffffff">\u25CF</span> <b>实时</b>' + '|' + (v?.toFixed(1)||'\u2014') + '|' + cny + '|' + formatDate(time));
   }
 
   overlays.forEach(o => {
@@ -288,11 +274,17 @@ chart.subscribeCrosshairMove(param => {
     const usd = v?.toFixed(1) || '\u2014';
     const cny = dp?.cny?.toFixed(2) || (v ? (v * 7.0 / 31.1035).toFixed(2) : '\u2014');
     const origT = dp ? dp.time : time;
-    lines.push('<span style="color:' + o.color + '">\u25CF</span> <b>' + o.label + '</b> US$' + usd + ' \u00A5' + cny + '  ' + formatDate(origT));
+    lines.push('<span style="color:' + o.color + '">\u25CF</span> <b>' + o.label + '</b>' + '|' + usd + '|' + cny + '|' + formatDate(origT));
   });
 
   if (lines.length > 0) {
-    tooltip.innerHTML = lines.join('<br>');
+    const rows = lines.map(l => '<div>' + l + '</div>').join('');
+    tooltip.innerHTML = '<div style="display:grid;grid-template-columns:auto 80px 80px 100px;gap:2px 10px;align-items:center">' +
+      '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px">名称</div>' +
+      '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px;text-align:right">USD</div>' +
+      '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px;text-align:right">CNY</div>' +
+      '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px;text-align:right">日期时间</div>' +
+      rows + '</div>';
     tooltip.style.display = 'block';
   } else {
     tooltip.style.display = 'none';
@@ -401,6 +393,10 @@ async function reloadMain(gran) {
     value: r[mode], usd: r.usd, cny: r.cny,
   }));
   mainSeries.setData(data);
+  chart.timeScale().fitContent();
+  const last = rows[rows.length - 1];
+  document.getElementById('pUsd').textContent = last.usd?.toFixed(1) ?? '—';
+  document.getElementById('pCny').textContent = last.cny?.toFixed(2) ?? '—';
 }
 
 async function reloadOverlay(o, gran) {
