@@ -32,12 +32,6 @@ async function api(path) {
 }
 
 // ====== Input helpers ======
-function setNow() {
-  const d = new Date();
-  document.getElementById('cmpDate').value = d.toISOString().slice(0, 10);
-  document.getElementById('cmpTime').value = d.toISOString().slice(11, 16);
-}
-
 function getDatetime() {
   const d = document.getElementById('cmpDate').value;
   const t = document.getElementById('cmpTime').value;
@@ -115,9 +109,11 @@ async function loadOverlay(o) {
     return { time: Math.floor(d.getTime() / 1000), value: r[mode] };
   });
 
+  const vr = chart.timeScale().getVisibleRange();
   if (o.series) chart.removeSeries(o.series);
   o.series = makeSeries(o.color, true);
   o.series.setData(applyOffset(o));
+  if (vr) chart.timeScale().setVisibleRange(vr);
   addMarkers(o);
 }
 
@@ -149,35 +145,6 @@ async function refetchOverlay(o, newDt) {
 }
 
 // ====== 按钮控制: 精确调节 ======
-function shiftOverlayTime(i, hours) {
-  const o = overlays[i];
-  if (!o) return;
-  o.timeShift = (o.timeShift || 0) + hours * 3600;
-  updateOverlayData(o);
-
-  // 偏移超过阈值时重新获取数据并重置 shift
-  if (Math.abs(o.timeShift) >= 7200) {
-    const totalH = o.timeShift / 3600;
-    const newDt = shiftDatetime(o.dt, Math.round(totalH));
-    o.timeShift = 0;
-    refetchOverlay(o, newDt);
-  }
-}
-
-function shiftOverlayPrice(i, delta) {
-  const o = overlays[i];
-  if (!o) return;
-  o.offset = (o.offset || 0) + delta;
-  updateOverlayData(o);
-}
-
-function updateOverlayData(o) {
-  if (!o.series || !o.data) return;
-  o.series.setData(applyOffset(o));
-  addMarkers(o);
-  renderTags();
-}
-
 function removeOverlay(i) {
   if (overlays[i].series) chart.removeSeries(overlays[i].series);
   overlays.splice(i, 1);
@@ -235,7 +202,7 @@ Object.assign(tooltip.style, {
   borderRadius: '4px', padding: '8px 12px', fontSize: '12px',
   zIndex: '1000', pointerEvents: 'none', whiteSpace: 'nowrap',
   boxShadow: '0 2px 10px rgba(0,0,0,0.6)', fontFamily: 'monospace',
-  minWidth: '220px',
+  minWidth: "180px",
 });
 document.body.appendChild(tooltip);
 
@@ -262,7 +229,7 @@ chart.subscribeCrosshairMove(param => {
   if (mv != null) {
     const v = mv.value ?? mv.close;
     const cny = v ? (v * 7.0 / 31.1035).toFixed(2) : '\u2014';
-    lines.push('<span style="color:#ffffff">\u25CF</span> <b>实时</b>' + '|' + (v?.toFixed(1)||'\u2014') + '|' + cny + '|' + formatDate(time));
+    lines.push(['<span style="color:#ffffff">\u25CF</span> <b>实时</b> ' + formatDate(time), (v?.toFixed(1)||'\u2014'), cny]);
   }
 
   overlays.forEach(o => {
@@ -274,17 +241,20 @@ chart.subscribeCrosshairMove(param => {
     const usd = v?.toFixed(1) || '\u2014';
     const cny = dp?.cny?.toFixed(2) || (v ? (v * 7.0 / 31.1035).toFixed(2) : '\u2014');
     const origT = dp ? dp.time : time;
-    lines.push('<span style="color:' + o.color + '">\u25CF</span> <b>' + o.label + '</b>' + '|' + usd + '|' + cny + '|' + formatDate(origT));
+    lines.push(['<span style="color:' + o.color + '">\u25CF</span> <b>' + o.label + '</b> ' + formatDate(origT), usd, cny]);
   });
 
   if (lines.length > 0) {
-    const rows = lines.map(l => '<div>' + l + '</div>').join('');
-    tooltip.innerHTML = '<div style="display:grid;grid-template-columns:auto 80px 80px 100px;gap:2px 10px;align-items:center">' +
-      '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px">名称</div>' +
+    const header = '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px">日期</div>' +
       '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px;text-align:right">USD</div>' +
-      '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px;text-align:right">CNY</div>' +
-      '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px;text-align:right">日期时间</div>' +
-      rows + '</div>';
+      '<div style="color:#787b86;font-size:10px;border-bottom:1px solid #3a3e4a;padding-bottom:2px;text-align:right">CNY</div>';
+    const body = lines.map(row =>
+      '<div>' + row[0] + '</div>' +
+      '<div style="text-align:right">' + row[1] + '</div>' +
+      '<div style="text-align:right">' + row[2] + '</div>'
+    ).join('');
+    tooltip.innerHTML = '<div style="display:grid;grid-template-columns:1fr 72px 72px;gap:1px 10px;align-items:center">' +
+      header + body + '</div>';
     tooltip.style.display = 'block';
   } else {
     tooltip.style.display = 'none';
@@ -392,8 +362,9 @@ async function reloadMain(gran) {
     time: Math.floor(new Date(r.dt).getTime() / 1000),
     value: r[mode], usd: r.usd, cny: r.cny,
   }));
+  const vr3 = chart.timeScale().getVisibleRange();
   mainSeries.setData(data);
-  chart.timeScale().fitContent();
+  if (vr3) chart.timeScale().setVisibleRange(vr3); else chart.timeScale().fitContent();
   const last = rows[rows.length - 1];
   document.getElementById('pUsd').textContent = last.usd?.toFixed(1) ?? '—';
   document.getElementById('pCny').textContent = last.cny?.toFixed(2) ?? '—';
@@ -411,7 +382,9 @@ async function reloadOverlay(o, gran) {
     const d = new Date(r.dt); d.setDate(d.getDate() + dayOffset);
     return { time: Math.floor(d.getTime() / 1000), value: r[mode], usd: r.usd, cny: r.cny, origTime: d.getTime() / 1000 };
   });
+  const vr2 = chart.timeScale().getVisibleRange();
   if (o.series) o.series.setData(applyOffset(o));
+  if (vr2) chart.timeScale().setVisibleRange(vr2);
 }
 
 initMain();
