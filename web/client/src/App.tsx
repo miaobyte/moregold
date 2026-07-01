@@ -16,7 +16,7 @@ export default function App() {
   const [mode, setMode] = useState<PriceMode>('usd');
   const [price, setPrice] = useState({ usd: '—', cny: '—' });
   const [overlays, setOverlays] = useState<Overlay[]>([]);
-  const [gran, setGran] = useState<Granularity>(5);
+  const [gran, setGran] = useState<Granularity>(1);
   const [manualGran, setManualGran] = useState<Granularity | 0>(0);
   const [tooltipLines, setTooltipLines] = useState<any[]>([]);
   const dragRef = useRef<any>(null);

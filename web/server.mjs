@@ -76,26 +76,28 @@ function handleSSE(req, res) {
 }
 
 // ====== Router ======
-// 多粒度 SQL: 1=1min, 5=5min, 60=1h, 1440=1d
+// 粒度: 1=1min,5=5min,15=15m,30=30m,60=1h,240=4h,720=12h,1440=1d,10080=1w
 function priceSQL(hours, granularity, isRecent, dt) {
-  if (granularity === 1) {
-    const where = isRecent
-      ? `dt >= DATE_SUB(NOW(), INTERVAL ${hours} HOUR)`
-      : `dt BETWEEN DATE_SUB('${dt}', INTERVAL ${hours} HOUR) AND DATE_ADD('${dt}', INTERVAL ${hours} HOUR)`;
-    return `SELECT dt, price_usd as usd, price_cny as cny FROM gold_prices WHERE ${where} AND price_usd>0 ORDER BY dt`;
-  }
-  if (granularity === 5) {
-    const where = isRecent
-      ? `dt >= DATE_SUB(NOW(), INTERVAL ${hours} HOUR)`
-      : `dt BETWEEN DATE_SUB('${dt}', INTERVAL ${hours} HOUR) AND DATE_ADD('${dt}', INTERVAL ${hours} HOUR)`;
-    return `SELECT dt, price_usd as usd, price_cny as cny FROM gold_prices WHERE ${where} AND MOD(minute,5)=0 AND price_usd>0 ORDER BY dt`;
-  }
-  // 聚合粒度 (60min or 1d)
-  const group = granularity === 1440 ? 'DATE(dt)' : 'DATE(dt), HOUR(dt), FLOOR(MINUTE(dt)/60)*60';
-  const where = isRecent
+  const w = isRecent
     ? `dt >= DATE_SUB(NOW(), INTERVAL ${hours} HOUR)`
     : `dt BETWEEN DATE_SUB('${dt}', INTERVAL ${hours} HOUR) AND DATE_ADD('${dt}', INTERVAL ${hours} HOUR)`;
-  return `SELECT MIN(dt) as dt, AVG(price_usd) as usd, AVG(price_cny) as cny FROM gold_prices WHERE ${where} AND price_usd>0 GROUP BY ${group} ORDER BY dt`;
+
+  // 无聚合: 过滤 mod minute
+  if (granularity <= 15) {
+    const mod = granularity === 1 ? '' : `AND MOD(minute,${granularity})=0`;
+    return `SELECT dt, price_usd as usd, price_cny as cny FROM gold_prices WHERE ${w} ${mod} AND price_usd>0 ORDER BY dt`;
+  }
+  // 聚合粒度
+  const groupMap = {
+    30: 'DATE(dt), HOUR(dt), FLOOR(MINUTE(dt)/30)*30',
+    60: 'DATE(dt), HOUR(dt)',
+    240: 'DATE(dt), FLOOR(HOUR(dt)/4)*4',
+    720: 'DATE(dt), FLOOR(HOUR(dt)/12)*12',
+    1440: 'DATE(dt)',
+    10080: 'YEARWEEK(dt)',
+  };
+  const group = groupMap[granularity] || 'DATE(dt), HOUR(dt)';
+  return `SELECT MIN(dt) as dt, AVG(price_usd) as usd, AVG(price_cny) as cny FROM gold_prices WHERE ${w} AND price_usd>0 GROUP BY ${group} ORDER BY dt`;
 }
 
 const routes = {
