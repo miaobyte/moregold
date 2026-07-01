@@ -55,7 +55,7 @@ export default function App() {
       if (mv != null) {
         const v = (mv as any).value ?? (mv as any).close;
         const cv = param.seriesData.get(cnyRef.current!);
-        const cnyVal = cv != null ? (cv as any).value ?? (cv as any).close : (v * 7.0 / 31.1035);
+        const cnyVal = cv != null ? (cv as any).value ?? (cv as any).close : 0;
         lines.push({ name: '实时', usd: v?.toFixed(1) || '—', cny: cnyVal?.toFixed(2) || '—', time: fmt(param.time as number), color: MAIN_COLOR });
       }
       setTooltipLines(lines);
@@ -73,7 +73,7 @@ export default function App() {
     }));
     const cnyData: PricePoint[] = rows.map(r => ({
       time: Math.floor(new Date(r.dt).getTime() / 1000) as Time,
-      value: r.cny || (r.usd * 7.0 / 31.1035), usd: r.usd, cny: r.cny,
+      value: r.cny, usd: r.usd, cny: r.cny,
     }));
     if (!mainRef.current && chartRef.current) {
       mainRef.current = chartRef.current.addLineSeries({ color: MAIN_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: false });
@@ -91,7 +91,7 @@ export default function App() {
   useSSE((d) => {
     const ts = Math.floor(new Date(d.dt).getTime() / 1000) as Time;
     mainRef.current?.update({ time: ts, value: d.usd });
-    cnyRef.current?.update({ time: ts, value: d.cny || (d.usd * 7.0 / 31.1035) });
+    cnyRef.current?.update({ time: ts, value: d.cny });
     setPrice({ usd: d.usd.toFixed(1), cny: d.cny.toFixed(2) });
   });
 
