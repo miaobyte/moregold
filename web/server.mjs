@@ -17,18 +17,30 @@ const MIME = {
   ".json": "application/json",
 };
 
-// ====== Static file server ======
-function serveStatic(req, res) {
-  let filePath = path.join(PUBLIC, req.url === "/" ? "index.html" : req.url);
-  const ext = path.extname(filePath);
-  if (!MIME[ext]) return false;
+// ====== Static file server (React build / SPA fallback) ======
+const SPA_EXT = new Set([".html", ".js", ".css", ".svg", ".png", ".ico", ".json", ".woff2"]);
 
+function serveStatic(req, res) {
+  const urlPath = req.url === "/" ? "/index.html" : req.url;
+  const filePath = path.join(PUBLIC, urlPath);
+
+  // 先试精确匹配
   try {
     const data = fs.readFileSync(filePath);
-    res.writeHead(200, { "Content-Type": MIME[ext], "Cache-Control": "no-cache" });
+    const ext = path.extname(filePath);
+    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream", "Cache-Control": "no-cache" });
     res.end(data);
     return true;
   } catch {
+    // SPA fallback: 非 API 请求 → index.html
+    if (!urlPath.startsWith("/api")) {
+      try {
+        const data = fs.readFileSync(path.join(PUBLIC, "index.html"));
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(data);
+        return true;
+      } catch { return false; }
+    }
     return false;
   }
 }
